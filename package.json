@@ -1,0 +1,26 @@
+{
+  "name": "grt-bus-time",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "build:free": "tsc --noEmit && BUILD_CHANNEL=free vite build",
+    "build:release": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "extpay": "3.1.2",
+    "fflate": "^0.8.2",
+    "gtfs-realtime-bindings": "^2.1.0",
+    "idb": "^8.0.2",
+    "papaparse": "^5.5.3"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.326",
+    "@types/papaparse": "^5.3.16",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0"
+  }
+}

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GRT Next Bus</title>
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Grand River Transit</p>
+          <h1>Next bus</h1>
+        </div>
+        <div class="header-actions">
+          <button class="plan-button" id="plan-button" type="button" aria-expanded="false" aria-controls="pro-access" hidden>Free</button>
+          <button class="test-notification-button" id="test-notification-button" type="button" aria-label="Send test notification" title="Send test notification" hidden>Test</button>
+          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh arrivals" title="Refresh arrivals">↻</button>
+        </div>
+      </header>
+
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+      <div class="data-error" id="data-error" hidden role="alert">
+        <span id="data-error-message">Could not load route data.</span>
+        <button class="status-retry" id="retry-route-data-button" type="button">Retry</button>
+      </div>
+
+      <section class="pro-access" id="pro-access" hidden aria-labelledby="pro-access-title">
+        <div class="plan-dialog" role="dialog" aria-modal="true" aria-labelledby="pro-access-title" aria-describedby="pro-access-message">
+          <button class="plan-close" id="plan-close" type="button" aria-label="Close plan details">×</button>
+          <div class="pro-access-copy">
+            <p class="eyebrow">GRT Next Bus Pro</p>
+            <h2 id="pro-access-title">Upgrade to Pro</h2>
+            <p id="pro-access-message">Unlock the features that make your next bus easier to catch.</p>
+          </div>
+          <div class="plan-benefit-card">
+            <p class="plan-benefit-lead" id="plan-benefit-lead">A clearer view of your next departure.</p>
+            <ul class="plan-perks">
+              <li>See the minutes until your next bus on the extension icon</li>
+              <li>Put your nearest saved stop first using your location</li>
+              <li>Get notified before your bus arrives</li>
+            </ul>
+            <p class="plan-price" id="plan-price"><strong>$0.99</strong><span>/ month</span><em>or</em><strong>$7.99</strong><span>/ year</span></p>
+            <div class="pro-access-actions">
+              <button class="primary-button" id="upgrade-button" type="button">Choose Pro</button>
+              <button class="secondary-button" id="restore-button" type="button">Already purchased? Restore</button>
+            </div>
+          </div>
+          <p class="plan-status" id="plan-status">Plans are monthly or yearly. Your saved stops stay right where they are.</p>
+          <p class="plan-disclaimer">GRT Next Bus Pro is sold by the developer through ExtensionPay.</p>
+        </div>
+      </section>
+
+      <section class="watches-section" aria-labelledby="watches-title">
+          <div class="section-heading watches-heading">
+            <div>
+              <p class="eyebrow">Your stops</p>
+              <h2 id="watches-title">Next departures</h2>
+            </div>
+            <span class="last-updated" id="last-updated" aria-live="polite"></span>
+        </div>
+        <div class="location-prompt" id="location-prompt" hidden>
+          <span>Use your location to put your closest saved stop first.</span>
+          <button class="location-button" id="location-button" type="button">Use location</button>
+        </div>
+        <div class="watches" id="watches"></div>
+        <div class="empty-state" id="empty-state">
+          <span class="empty-icon">✦</span>
+          <p>Choose a route, direction, and stop to see arrivals here.</p>
+        </div>
+      </section>
+
+      <section class="setup-card" id="setup-card" aria-labelledby="setup-title">
+        <button class="setup-toggle" id="setup-toggle" type="button" aria-expanded="true" aria-controls="setup-content">
+          <span class="setup-toggle-copy">
+            <span class="eyebrow" id="setup-label">Add a stop</span>
+            <span class="setup-title" id="setup-title">Choose a stop</span>
+          </span>
+          <span class="setup-toggle-actions">
+            <span class="step-count" id="step-count">1 of 3</span>
+            <span class="collapse-icon" aria-hidden="true">⌃</span>
+          </span>
+        </button>
+
+        <div class="setup-content" id="setup-content">
+          <div class="step" id="route-step">
+            <label for="route-select">Route</label>
+            <select id="route-select">
+              <option value="">Select a route</option>
+            </select>
+          </div>
+
+          <div class="step" id="direction-step" hidden>
+            <label for="direction-select">Direction</label>
+            <select id="direction-select">
+              <option value="">Select a direction</option>
+            </select>
+          </div>
+
+          <div class="step" id="stop-step" hidden>
+            <div class="label-row">
+              <label for="stop-select">Stop</label>
+              <button class="near-button" id="near-button" type="button">📍 Near me</button>
+            </div>
+            <select id="stop-select">
+              <option value="">Select a stop</option>
+            </select>
+          </div>
+
+          <button class="primary-button" id="save-button" type="button" disabled>Save stop</button>
+        </div>
+      </section>
+
+    </main>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
