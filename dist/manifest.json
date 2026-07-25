@@ -3,6 +3,12 @@
   "name": "GRT Next Bus",
   "version": "1.0.0",
   "description": "See Grand River Transit departures, with optional Pro countdowns, closest-stop ordering, and arrival alerts.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
   "permissions": [
     "storage",
     "alarms",
@@ -24,6 +30,12 @@
   },
   "action": {
     "default_title": "GRT Next Bus",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
   }
 }

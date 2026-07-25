@@ -2,9 +2,16 @@
   "manifest_version": 3,
   "name": "GRT Next Bus Free",
   "version": "1.0.0",
-  "description": "See the next three Grand River Transit departures for your saved stops.",
+  "description": "See the next three Grand River Transit departures for your saved stops, with nearby stop finding.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
   "permissions": [
-    "storage"
+    "storage",
+    "geolocation"
   ],
   "host_permissions": [
     "https://webapps.regionofwaterloo.ca/*"
@@ -15,6 +22,12 @@
   },
   "action": {
     "default_title": "GRT Next Bus Free",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
   }
 }

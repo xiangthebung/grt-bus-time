@@ -5,19 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GRT Next Bus</title>
     <script type="module" crossorigin src="./popup.js"></script>
-    <link rel="modulepreload" crossorigin href="./assets/payments-sNVBk5E1.js">
-    <link rel="stylesheet" crossorigin href="./assets/popup-Cqd2BPjI.css">
+    <link rel="modulepreload" crossorigin href="./assets/payments-DrSbRHv4.js">
+    <link rel="stylesheet" crossorigin href="./assets/popup-BBt23Daf.css">
   </head>
   <body>
     <main class="popup-shell">
       <header class="app-header">
-        <div>
-          <p class="eyebrow">Grand River Transit</p>
-          <h1>Next bus</h1>
+        <div class="brand-lockup">
+          <img class="brand-mark" src="./icon.svg" alt="" aria-hidden="true" width="42" height="42" />
+          <div class="brand-copy">
+            <p class="eyebrow">Grand River Transit</p>
+            <h1>Next bus</h1>
+          </div>
         </div>
         <div class="header-actions">
           <button class="plan-button" id="plan-button" type="button" aria-expanded="false" aria-controls="pro-access" hidden>Free</button>
-          <button class="test-notification-button" id="test-notification-button" type="button" aria-label="Send test notification" title="Send test notification" hidden>Test</button>
           <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh arrivals" title="Refresh arrivals">↻</button>
         </div>
       </header>
@@ -66,6 +68,31 @@
           <span>Use your location to put your closest saved stop first.</span>
           <button class="location-button" id="location-button" type="button">Use location</button>
         </div>
+        <section class="alert-test" id="alert-test" hidden aria-labelledby="alert-test-title">
+          <div class="alert-test-heading">
+            <div>
+              <p class="eyebrow">Alert check</p>
+              <h3 id="alert-test-title">Check your notifications</h3>
+            </div>
+            <button class="alert-test-close" id="alert-test-close" type="button" aria-label="Close alert check">×</button>
+          </div>
+          <p class="alert-test-message" id="alert-test-message" role="status" aria-live="polite"></p>
+          <div class="alert-test-actions" id="alert-test-actions">
+            <button class="primary-button" id="alert-test-confirm" type="button">Yes, I saw it</button>
+            <button class="secondary-button" id="alert-test-no" type="button">No, show me how</button>
+          </div>
+          <div class="alert-test-help" id="alert-test-help" hidden>
+            <ol class="alert-test-help-list">
+              <li>Turn off Focus mode or Do Not Disturb so notifications can appear.</li>
+              <li>Open System Settings → Notifications → Google Chrome and turn on <strong>Allow notifications</strong>. Choose Banners or Alerts.</li>
+              <li>If Chrome asks for permission, choose <strong>Allow</strong>, then return here and try again.</li>
+            </ol>
+            <div class="alert-test-help-actions">
+              <button class="primary-button" id="alert-test-retry" type="button">Try again</button>
+              <button class="secondary-button" id="alert-test-done" type="button">Close</button>
+            </div>
+          </div>
+        </section>
         <div class="watches" id="watches"></div>
         <div class="empty-state" id="empty-state">
           <span class="empty-icon">✦</span>
@@ -103,7 +130,7 @@
           <div class="step" id="stop-step" hidden>
             <div class="label-row">
               <label for="stop-select">Stop</label>
-              <button class="near-button" id="near-button" type="button">📍 Near me</button>
+              <button class="near-button" id="near-button" type="button">📍 Sort by near me</button>
             </div>
             <select id="stop-select">
               <option value="">Select a stop</option>

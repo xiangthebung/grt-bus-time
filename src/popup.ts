@@ -55,6 +55,8 @@ type NotificationStatusResponse =
       error: string;
     };
 
+const ALERT_TEST_COMPLETED_KEY = "alertTestCompleted";
+
 const routeSelect = document.querySelector<HTMLSelectElement>("#route-select");
 const directionSelect = document.querySelector<HTMLSelectElement>("#direction-select");
 const stopSelect = document.querySelector<HTMLSelectElement>("#stop-select");
@@ -78,7 +80,15 @@ const setupTitle = document.querySelector<HTMLElement>("#setup-title");
 const collapseIcon = document.querySelector<HTMLElement>(".collapse-icon");
 const planButton = document.querySelector<HTMLButtonElement>("#plan-button");
 const planClose = document.querySelector<HTMLButtonElement>("#plan-close");
-const testNotificationButton = document.querySelector<HTMLButtonElement>("#test-notification-button");
+const alertTest = document.querySelector<HTMLElement>("#alert-test");
+const alertTestMessage = document.querySelector<HTMLElement>("#alert-test-message");
+const alertTestActions = document.querySelector<HTMLElement>("#alert-test-actions");
+const alertTestHelp = document.querySelector<HTMLElement>("#alert-test-help");
+const alertTestConfirm = document.querySelector<HTMLButtonElement>("#alert-test-confirm");
+const alertTestNo = document.querySelector<HTMLButtonElement>("#alert-test-no");
+const alertTestRetry = document.querySelector<HTMLButtonElement>("#alert-test-retry");
+const alertTestDone = document.querySelector<HTMLButtonElement>("#alert-test-done");
+const alertTestClose = document.querySelector<HTMLButtonElement>("#alert-test-close");
 const locationPrompt = document.querySelector<HTMLElement>("#location-prompt");
 const locationButton = document.querySelector<HTMLButtonElement>("#location-button");
 const proAccess = document.querySelector<HTMLElement>("#pro-access");
@@ -115,7 +125,15 @@ if (
   !collapseIcon ||
   !planButton ||
   !planClose ||
-  !testNotificationButton ||
+  !alertTest ||
+  !alertTestMessage ||
+  !alertTestActions ||
+  !alertTestHelp ||
+  !alertTestConfirm ||
+  !alertTestNo ||
+  !alertTestRetry ||
+  !alertTestDone ||
+  !alertTestClose ||
   !locationPrompt ||
   !locationButton ||
   !proAccess ||
@@ -155,7 +173,15 @@ const elements = {
   collapseIcon,
   planButton,
   planClose,
-  testNotificationButton,
+  alertTest,
+  alertTestMessage,
+  alertTestActions,
+  alertTestHelp,
+  alertTestConfirm,
+  alertTestNo,
+  alertTestRetry,
+  alertTestDone,
+  alertTestClose,
   locationPrompt,
   locationButton,
   proAccess,
@@ -182,6 +208,10 @@ const state: {
   planOpen: boolean;
   proPaid: boolean;
   paymentError: boolean;
+  alertTestOpen: boolean;
+  alertTestHelpOpen: boolean;
+  alertTestStopName: string;
+  alertTestMessage: string;
   lastRealtimeAt?: number;
   planPreviousFocus?: HTMLElement;
   nearestWatchId?: string;
@@ -197,6 +227,10 @@ const state: {
   planOpen: false,
   proPaid: !IS_PRO_BUILD,
   paymentError: false,
+  alertTestOpen: false,
+  alertTestHelpOpen: false,
+  alertTestStopName: "",
+  alertTestMessage: "",
 };
 
 function hasProFeatures(): boolean {
@@ -207,6 +241,34 @@ function setStatus(message: string, error = false): void {
   elements.statusElement.textContent = message;
   elements.statusElement.classList.toggle("visible", Boolean(message));
   elements.statusElement.classList.toggle("error", error);
+}
+
+function renderAlertTest(): void {
+  const visible = hasProFeatures() && state.alertTestOpen;
+  elements.alertTest.hidden = !visible;
+  if (!visible) return;
+  elements.alertTestMessage.textContent = state.alertTestMessage;
+  elements.alertTestActions.hidden = state.alertTestHelpOpen;
+  elements.alertTestHelp.hidden = !state.alertTestHelpOpen;
+}
+
+function closeAlertTest(): void {
+  state.alertTestOpen = false;
+  renderAlertTest();
+}
+
+function showAlertTestHelp(message: string): void {
+  state.alertTestOpen = true;
+  state.alertTestHelpOpen = true;
+  state.alertTestMessage = message;
+  renderAlertTest();
+}
+
+function showAlertTestPrompt(message: string): void {
+  state.alertTestOpen = true;
+  state.alertTestHelpOpen = false;
+  state.alertTestMessage = message;
+  renderAlertTest();
 }
 
 function showDataError(message: string): void {
@@ -359,7 +421,6 @@ function getStopsForSelection(): Stop[] {
 }
 
 function renderStopOptions(): void {
-  elements.nearButton.hidden = !hasProFeatures();
   const stops = getStopsForSelection();
   state.visibleStops = state.visibleStops.length > 0 ? state.visibleStops : stops;
   if (
@@ -618,21 +679,52 @@ async function getNotificationStatus(): Promise<NotificationStatusResponse> {
   return runtimeMessage<NotificationStatusResponse>({ type: "NOTIFICATION_STATUS" });
 }
 
+async function hasCompletedAlertTest(): Promise<boolean> {
+  const result = await chrome.storage.local.get(ALERT_TEST_COMPLETED_KEY);
+  return result[ALERT_TEST_COMPLETED_KEY] === true;
+}
+
+async function completeAlertTest(): Promise<void> {
+  await chrome.storage.local.set({ [ALERT_TEST_COMPLETED_KEY]: true });
+  closeAlertTest();
+  setStatus("Alerts are on and ready for your saved stops.");
+}
+
 function notificationPermissionMessage(status: NotificationStatusResponse): string {
   if (!status.ok) return status.error;
   if (!status.extensionPermissionGranted) {
-    return "Chrome notification access was not granted. Press Test again and choose Allow.";
+    return "Notification access is off. Choose Allow when Chrome asks for notification access.";
   }
   if (status.permissionLevel !== "granted") {
-    return "Chrome notifications are blocked. Turn on Google Chrome in macOS System Settings → Notifications, then try again.";
+    return "Notifications are blocked. Turn off Focus mode, then open System Settings → Notifications → Google Chrome and turn on Allow notifications.";
   }
-  return "Chrome says notifications are enabled. If nothing appears, check Google Chrome in macOS System Settings → Notifications.";
+  return "Chrome says notifications are enabled, but no banner appeared. Check Focus mode and Google Chrome in System Settings → Notifications.";
 }
 
-async function sendTestNotification(): Promise<void> {
-  if (!IS_PRO_BUILD) return;
-  elements.testNotificationButton.disabled = true;
-  setStatus("Requesting notification permission…");
+async function runAlertTest(): Promise<void> {
+  const stopName = state.alertTestStopName || "your saved stop";
+  showAlertTestPrompt("Sending a test notification…");
+  try {
+    const response = await runtimeMessage<
+      NotificationStatusResponse & { notificationId?: string }
+    >({
+      type: "TEST_NOTIFICATION",
+    });
+    if (!response.ok) {
+      showAlertTestHelp(notificationPermissionMessage(response));
+      return;
+    }
+    showAlertTestPrompt(`We sent a test notification for ${stopName}. Did it appear?`);
+  } catch (error) {
+    showAlertTestHelp(
+      error instanceof Error
+        ? error.message
+        : "The test notification could not be sent. Check these settings and try again.",
+    );
+  }
+}
+
+async function retryAlertTest(): Promise<void> {
   try {
     if (!(await requestNotificationPermission())) {
       const status = await getNotificationStatus().catch(
@@ -641,26 +733,21 @@ async function sendTestNotification(): Promise<void> {
           error: "Chrome did not grant notification access.",
         }),
       );
-      setStatus(notificationPermissionMessage(status), true);
+      showAlertTestHelp(notificationPermissionMessage(status));
       return;
     }
-    const response = await runtimeMessage<
-      NotificationStatusResponse & { notificationId?: string }
-    >({
-      type: "TEST_NOTIFICATION",
-    });
-    if (!response.ok) {
-      setStatus(notificationPermissionMessage(response), true);
+    const status = await getNotificationStatus();
+    if (!status.ok || !status.extensionPermissionGranted || status.permissionLevel !== "granted") {
+      showAlertTestHelp(notificationPermissionMessage(status));
       return;
     }
-    setStatus("Chrome accepted the test. If no banner appears, enable Google Chrome in macOS System Settings → Notifications.");
+    await runAlertTest();
   } catch (error) {
-    setStatus(
-      error instanceof Error ? error.message : "Could not send a test notification.",
-      true,
+    showAlertTestHelp(
+      error instanceof Error
+        ? error.message
+        : "The test notification could not be sent. Check these settings and try again.",
     );
-  } finally {
-    elements.testNotificationButton.disabled = false;
   }
 }
 
@@ -695,7 +782,9 @@ async function enableLocation(): Promise<void> {
 async function updateAlertEnabled(watch: Watch, enabled: boolean): Promise<void> {
   if (!hasProFeatures()) return;
   try {
+    let shouldRunAlertTest = false;
     if (enabled) {
+      state.alertTestStopName = watch.stopName;
       if (!(await requestNotificationPermission())) {
         const status = await getNotificationStatus().catch(
           (): NotificationStatusResponse => ({
@@ -703,20 +792,26 @@ async function updateAlertEnabled(watch: Watch, enabled: boolean): Promise<void>
             error: "Chrome did not grant notification access.",
           }),
         );
-        setStatus(notificationPermissionMessage(status), true);
+        const message = notificationPermissionMessage(status);
+        setStatus(message, true);
+        showAlertTestHelp(message);
         return;
       }
 
       const status = await getNotificationStatus();
       if (!status.ok || !status.extensionPermissionGranted || status.permissionLevel !== "granted") {
-        setStatus(notificationPermissionMessage(status), true);
+        const message = notificationPermissionMessage(status);
+        setStatus(message, true);
+        showAlertTestHelp(message);
         return;
       }
+      shouldRunAlertTest = !(await hasCompletedAlertTest());
     }
     state.watches = await setWatchAlerts(watch.id, enabled, getAlertLeadMinutes(watch));
     renderWatches();
     void runtimeMessage<{ ok: boolean }>({ type: "ALERTS_UPDATED" }).catch(() => undefined);
     setStatus("");
+    if (shouldRunAlertTest) await runAlertTest();
   } catch {
     setStatus("Could not update arrival alerts.", true);
     renderWatches();
@@ -741,7 +836,6 @@ async function updateAlertTime(watch: Watch, alertLeadMinutes: number): Promise<
 }
 
 async function sortStopsNearMe(): Promise<void> {
-  if (!hasProFeatures()) return;
   elements.nearButton.disabled = true;
   setStatus("Finding stops near you…");
   try {
@@ -823,7 +917,6 @@ function schedulePopupRefresh(): void {
 function renderPlanButton(): void {
   const pro = hasProFeatures();
   elements.planButton.hidden = !IS_PRO_BUILD;
-  elements.testNotificationButton.hidden = !IS_PRO_BUILD;
   elements.planButton.textContent = pro ? "Pro" : "Free";
   elements.planButton.classList.toggle("pro", pro);
   elements.planButton.setAttribute("aria-expanded", String(state.planOpen));
@@ -901,6 +994,7 @@ function renderPaymentState(): void {
   renderProAccess();
   renderSetup();
   renderWatches();
+  renderAlertTest();
 }
 
 async function loadPaymentStatus(): Promise<void> {
@@ -998,8 +1092,24 @@ elements.retryRouteDataButton.addEventListener("click", () => {
   void retryRouteData();
 });
 
-elements.testNotificationButton.addEventListener("click", () => {
-  void sendTestNotification();
+elements.alertTestConfirm.addEventListener("click", () => {
+  void completeAlertTest();
+});
+
+elements.alertTestNo.addEventListener("click", () => {
+  showAlertTestHelp("No problem—check these settings, then try the test again.");
+});
+
+elements.alertTestRetry.addEventListener("click", () => {
+  void retryAlertTest();
+});
+
+elements.alertTestDone.addEventListener("click", () => {
+  closeAlertTest();
+});
+
+elements.alertTestClose.addEventListener("click", () => {
+  closeAlertTest();
 });
 
 elements.upgradeButton.addEventListener("click", () => {

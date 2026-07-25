@@ -59,6 +59,15 @@ button { cursor: pointer; }
 }
 
 .app-header { margin-bottom: 16px; }
+.brand-lockup { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 12px;
+  box-shadow: 0 7px 16px rgba(40, 118, 111, .18);
+}
+.brand-copy { min-width: 0; }
 
 .eyebrow {
   margin: 0 0 3px;
@@ -87,20 +96,9 @@ h1 { margin-bottom: 0; color: #142a32; font-size: 27px; line-height: 1; letter-s
 .plan-button:hover { background: #fff; }
 .plan-button.pro { color: #fff; border-color: #28766f; background: #28766f; }
 .plan-button.pro:hover { background: #1c5c57; }
-.test-notification-button {
-  min-height: 30px;
-  padding: 0 7px;
-  border: 1px solid #cddbdc;
-  border-radius: 8px;
-  color: #28766f;
-  background: rgba(255, 255, 255, .8);
-  font-size: 9px;
-  font-weight: 800;
-}
-.test-notification-button:hover { background: #fff; }
-.test-notification-button:disabled { cursor: wait; opacity: .55; }
 .plan-button:focus-visible,
 .plan-close:focus-visible,
+.alert-test-close:focus-visible,
 .secondary-button:focus-visible { outline: 3px solid rgba(57, 146, 138, .25); outline-offset: 2px; }
 h2 { margin-bottom: 0; color: #213942; font-size: 15px; line-height: 1.2; }
 
@@ -276,6 +274,39 @@ h2 { margin-bottom: 0; color: #213942; font-size: 15px; line-height: 1.2; }
 }
 .location-button:hover { color: #1b514d; text-decoration: underline; }
 .location-button:disabled { cursor: wait; opacity: .5; }
+
+.alert-test {
+  margin: 0 0 10px;
+  padding: 11px 10px 10px;
+  border: 1px solid #cfe0df;
+  border-radius: 12px;
+  background: #f0f8f7;
+}
+.alert-test-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.alert-test-heading .eyebrow { margin-bottom: 2px; }
+.alert-test-heading h3 { margin: 0; color: #213942; font-size: 13px; line-height: 1.25; }
+.alert-test-close {
+  width: 23px;
+  height: 23px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: #7c8e91;
+  background: transparent;
+  font-size: 17px;
+  line-height: 1;
+}
+.alert-test-close:hover { color: #28766f; background: #e1efed; }
+.alert-test-message { margin: 8px 0 10px; color: #52696e; font-size: 11px; line-height: 1.4; }
+.alert-test-actions,
+.alert-test-help-actions { display: flex; gap: 7px; }
+.alert-test-actions > button,
+.alert-test-help-actions > button { flex: 1; min-height: 32px; margin-top: 0; font-size: 10px; }
+.alert-test-actions .secondary-button,
+.alert-test-help-actions .secondary-button { width: auto; }
+.alert-test-help-list { display: grid; gap: 7px; margin: 0 0 11px; padding-left: 18px; color: #52696e; font-size: 10px; line-height: 1.4; }
+.alert-test-help-list li::marker { color: #28766f; font-weight: 800; }
 
 .setup-toggle {
   display: flex;

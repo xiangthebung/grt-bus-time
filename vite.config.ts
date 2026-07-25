@@ -1,11 +1,13 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
-const isFreeBuild = process.env.BUILD_CHANNEL === "free";
+const buildEnv = loadEnv("production", projectRoot, "");
+const isFreeBuild = process.env.BUILD_CHANNEL === "free" || buildEnv.BUILD_CHANNEL === "free";
 const isProBuild = !isFreeBuild;
-const extensionPayId = process.env.EXTPAY_EXTENSION_ID?.trim() || "";
+const extensionPayId =
+  process.env.EXTPAY_EXTENSION_ID?.trim() || buildEnv.EXTPAY_EXTENSION_ID?.trim() || "grt-next-bus";
 const outputDirectory = `${projectRoot}/${isFreeBuild ? "dist-free" : "dist"}`;
 const freePaymentModule = fileURLToPath(new URL("./src/payments.free.ts", import.meta.url));
 
@@ -54,8 +56,8 @@ export default defineConfig({
         } else {
           manifest.name = "GRT Next Bus Free";
           manifest.description =
-            "See the next three Grand River Transit departures for your saved stops.";
-          manifest.permissions = ["storage"];
+            "See the next three Grand River Transit departures for your saved stops, with nearby stop finding.";
+          manifest.permissions = ["storage", "geolocation"];
           delete manifest.optional_permissions;
           manifest.host_permissions = ["https://webapps.regionofwaterloo.ca/*"];
           delete manifest.content_security_policy;
