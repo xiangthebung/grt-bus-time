@@ -41,7 +41,7 @@ export default defineConfig({
         if (isProBuild) {
           manifest.name = "GRT Next Bus";
           manifest.description =
-            "See Grand River Transit departures, with optional Pro countdowns, closest-stop ordering, and arrival alerts.";
+            "Live Grand River Transit departures for your saved stops, with optional Pro countdowns, alerts, and closest-stop ordering.";
           manifest.permissions = ["storage", "alarms", "geolocation"];
           manifest.optional_permissions = ["notifications"];
           manifest.host_permissions = [
@@ -56,11 +56,14 @@ export default defineConfig({
         } else {
           manifest.name = "GRT Next Bus Free";
           manifest.description =
-            "See the next three Grand River Transit departures for your saved stops, with nearby stop finding.";
-          manifest.permissions = ["storage", "geolocation"];
+            "Live Grand River Transit departures for your saved stops, with nearby stop search and service alerts.";
+          manifest.permissions = ["storage", "alarms", "geolocation"];
           delete manifest.optional_permissions;
           manifest.host_permissions = ["https://webapps.regionofwaterloo.ca/*"];
-          delete manifest.content_security_policy;
+          manifest.content_security_policy = {
+            extension_pages:
+              "script-src 'self'; object-src 'self'; connect-src 'self' https://webapps.regionofwaterloo.ca",
+          };
           if (manifest.action) manifest.action.default_title = "GRT Next Bus Free";
         }
         writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
