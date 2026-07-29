@@ -11,14 +11,32 @@ import type { RealtimeSnapshot } from "./types";
 export type ExtensionRequest =
   | { type: "ENSURE_SCHEDULE"; force?: boolean }
   | { type: "GET_REALTIME"; force?: boolean }
-  /** Recompute the toolbar badge from data already in hand. No network. */
+  /** Recompute the toolbar badge so it agrees with the open popup. */
   | { type: "REFRESH_BADGE" }
   | { type: "STOPS_CHANGED" }
   | { type: "LOCATION_CHANGED" }
   | { type: "PAYMENT_CHANGED" }
-  | { type: "REFRESH_BADGE" }
   | { type: "NOTIFICATION_STATUS" }
   | { type: "SEND_TEST_NOTIFICATION" };
+
+/* ------------------------------------------------------------------ *
+ * Service worker -> offscreen document
+ * ------------------------------------------------------------------ */
+
+/**
+ * Marks a message as meant for the offscreen document. Offscreen documents
+ * share the extension's message bus, so both ends filter on this.
+ */
+export const GEOLOCATION_TARGET = "grt-offscreen-geolocation";
+
+export interface GeolocationAsk {
+  target: typeof GEOLOCATION_TARGET;
+}
+
+export type GeolocationReply =
+  | { ok: true; latitude: number; longitude: number; accuracyMeters?: number }
+  /** `code` mirrors `GeolocationPositionError.code`; 1 means the rider said no. */
+  | { ok: false; code?: number; error: string };
 
 export interface ScheduleReadyPayload {
   fetchedAt: number;

@@ -20,20 +20,29 @@ import {
   routeBadgeColor,
 } from "./format";
 import {
+  chooseNearestSavedStop,
   getCurrentPosition,
+  getNearestStopChoice,
   hasLocationConsent,
-  haversineMeters,
   isLocationDenied,
-  nearestSavedStopId,
   nearestStops,
   resolveLocation,
   saveLastLocation,
+  savedStopDistances,
   setLocationConsent,
+  setNearestStopChoice,
   type StopWithDistance,
 } from "./geo";
 import { coversToday, readIndex } from "./indexStore";
 import { errorMessage, sendRequest } from "./messages";
-import { getPaymentUser, openLoginPage, openPaymentPage, PAYMENTS_CONFIGURED } from "./payments";
+import {
+  getPaymentPlans,
+  getPaymentUser,
+  openLoginPage,
+  openPaymentPage,
+  PAYMENTS_CONFIGURED,
+} from "./payments";
+import { describePlan, type Plan } from "./plans";
 import { IS_PRO_BUILD } from "./pro";
 import {
   addSavedStop,
@@ -43,6 +52,7 @@ import {
   restoreSavedStop,
   saveSettings,
   setStopAlerts,
+  setStopRoute,
 } from "./storage";
 import { serviceDateKey } from "./time";
 import {
@@ -54,6 +64,7 @@ import {
   patternKey,
   REALTIME_STALE_MS,
   type GtfsIndex,
+  type Route,
   type SavedStop,
   type ServiceAlert,
   type Settings,
@@ -141,6 +152,12 @@ interface AppState {
   loading: boolean;
   isPro: boolean;
   paymentUnavailable: boolean;
+  /**
+   * Plans as ExtensionPay reports them. `undefined` means "not asked yet", an
+   * empty array means "asked, and there is nothing showable" — a difference the
+   * price line has to respect, because the two say different things to a reader.
+   */
+  plans?: Plan[];
   planOpen: boolean;
   settingsOpen: boolean;
   pickerOpen: boolean;
@@ -212,7 +229,7 @@ function flashStatus(message: string, tone: "info" | "error" = "info"): void {
   window.clearTimeout(flashTimer);
   flashTimer = window.setTimeout(() => {
     state.flash = undefined;
-    render();
+    render({ background: true });
   }, tone === "error" ? FLASH_ERROR_MS : FLASH_MS);
   render();
 }
@@ -333,7 +350,7 @@ async function refreshRealtime(
     }
   } finally {
     el.refreshButton.classList.remove("spinning");
-    render();
+    render({ background: true });
   }
 }
 
@@ -353,6 +370,26 @@ async function loadPaymentStatus(): Promise<void> {
   }
 }
 
+/**
+ * Fetches the plans, once, the first time the card is opened.
+ *
+ * Not at startup: most sessions never open the plan card, and a rider who wants
+ * to know when the next bus is should not wait on a pricing request. Failure is
+ * not surfaced as an error either — the card falls back to saying the price is
+ * shown at checkout, which is true and is better than a number this build
+ * happened to be compiled with.
+ */
+async function loadPlans(): Promise<void> {
+  if (!PAYMENTS_CONFIGURED || state.plans !== undefined) return;
+  try {
+    state.plans = await getPaymentPlans();
+  } catch (error) {
+    console.warn("Could not read the plans from ExtensionPay", error);
+    state.plans = [];
+  }
+  render();
+}
+
 async function refreshLocation(): Promise<void> {
   if (!state.index) return;
   const location = await resolveLocation();
@@ -361,25 +398,26 @@ async function refreshLocation(): Promise<void> {
     state.nearestSavedId = undefined;
     return;
   }
-  const stopsById = new Map(state.index.stops.map((stop) => [stop.id, stop]));
-  const distances = new Map<string, number>();
-  for (const saved of state.savedStops) {
-    const stop = stopsById.get(saved.stopId);
-    if (!stop) continue;
-    distances.set(
-      saved.id,
-      haversineMeters(location.latitude, location.longitude, stop.lat, stop.lon),
-    );
+  state.distancesById = savedStopDistances(
+    state.savedStops,
+    state.index.stops,
+    location.latitude,
+    location.longitude,
+  );
+  if (proUnlocked()) {
+    // Same helper and same shared previous choice as the badge, so the stop this
+    // list leads with is the stop the toolbar icon is counting down.
+    const choice = chooseNearestSavedStop({
+      savedStops: state.savedStops,
+      stops: state.index.stops,
+      location,
+      previousId: await getNearestStopChoice(),
+    });
+    state.nearestSavedId = choice?.id;
+    await setNearestStopChoice(choice?.id);
+  } else {
+    state.nearestSavedId = undefined;
   }
-  state.distancesById = distances;
-  state.nearestSavedId = proUnlocked()
-    ? nearestSavedStopId(
-        state.savedStops,
-        state.index.stops,
-        location.latitude,
-        location.longitude,
-      )
-    : undefined;
   void sendRequest({ type: "LOCATION_CHANGED" }).catch(() => undefined);
 }
 
@@ -395,6 +433,7 @@ function boardFor(saved: SavedStop): DepartureBoard {
     stopId: saved.stopId,
     // Wide enough to find later runs of whichever route comes first.
     limit: Math.min(24, state.settings.departuresPerStop * 4),
+    ...(saved.routeId ? { routeId: saved.routeId } : {}),
   });
 }
 
@@ -458,6 +497,7 @@ function renderAlerts(): void {
       state.index,
       { ...EMPTY_REALTIME, alerts: state.alerts },
       saved.stopId,
+      saved.routeId,
     );
     for (const alert of alerts) relevant.set(alert.id, alert);
   }
@@ -745,9 +785,96 @@ function renderStopTools(saved: SavedStop): HTMLElement {
   return tools;
 }
 
-function stopEmptyMessage(board: DepartureBoard): string {
+/**
+ * What a saved entry is watching. The live feed is preferred over the name
+ * stored with the entry so a renamed route corrects itself, and the stored name
+ * covers the moment before the feed has loaded.
+ */
+function savedRouteLabel(saved: SavedStop): string | undefined {
+  if (!saved.routeId) return undefined;
+  const known = routeShortName(saved.routeId);
+  return known === saved.routeId ? (saved.routeShortName ?? known) : known;
+}
+
+/**
+ * Which route the card follows, as buttons rather than a menu.
+ *
+ * A menu hid the answer behind a press and hid the alternatives behind another
+ * one, for a choice that is at most a handful of short numbers. They ride along
+ * on the meta line beside the stop code instead of taking a row of their own:
+ * a row cost every card thirty-odd pixels for four small numbers, on a panel
+ * where a saved stop should fit on screen with the others. Only drawn when there
+ * is a choice to make — a stop with one route has none.
+ *
+ * It also gives every stop saved before routes existed a way in. Those all
+ * follow every route, and without this the only route choice would be on stops
+ * saved from now on.
+ */
+function renderStopRoutes(saved: SavedStop): HTMLElement | undefined {
+  const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
+  if (routeIds.length < 2) return undefined;
+
+  // A route the feed has since stopped listing at this stop still gets a chip,
+  // so the card cannot end up following a route with nothing selected.
+  const options = [
+    { routeId: "", label: "Any", name: "Every route", title: "Whichever bus comes next" },
+    ...routeIds.map((routeId) => {
+      const label = routeFor(routeId)?.shortName ?? routeId;
+      return {
+        routeId,
+        label,
+        name: `Route ${label}`,
+        title: routeFor(routeId)?.longName ?? `Route ${label}`,
+      };
+    }),
+    ...(saved.routeId && !routeIds.includes(saved.routeId)
+      ? [
+          {
+            routeId: saved.routeId,
+            label: savedRouteLabel(saved) ?? saved.routeId,
+            name: `Route ${savedRouteLabel(saved) ?? saved.routeId}`,
+            title: "No longer listed at this stop",
+          },
+        ]
+      : []),
+  ];
+
+  const row = element("div", { className: "stop-routes" });
+  row.setAttribute("role", "radiogroup");
+  row.setAttribute("aria-label", `Route followed at ${saved.stopName}`);
+  for (const option of options) {
+    const active = (saved.routeId ?? "") === option.routeId;
+    const chip = button(`stop-route${active ? " is-active" : ""}`, {
+      text: option.label,
+      // "This one" rather than the route's long name: on the selected chip the
+      // useful thing to say is why pressing it does nothing.
+      title: active ? "Followed by this card" : option.title,
+      // Named for the option, not for an action. `aria-checked` carries the
+      // state, so a label like "Follow route 31" would promise a press that the
+      // selected chip does not perform.
+      ariaLabel: option.name,
+      dataset: { focusKey: `route:${saved.id}:${option.routeId}` },
+      onClick: () => {
+        if (!active) void changeStopRoute(saved, option.routeId);
+      },
+    });
+    chip.setAttribute("role", "radio");
+    chip.setAttribute("aria-checked", String(active));
+    if (active && option.routeId) paintRouteChip(chip, option.routeId);
+    row.append(chip);
+  }
+  return row;
+}
+
+function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
   if (board.scheduleExpired) {
     return "The saved timetable does not cover today. Reload the schedule from settings.";
+  }
+  const route = savedRouteLabel(saved);
+  if (route) {
+    // Naming the route matters here: other buses may well be running, and
+    // "out of service" on its own would look like the whole stop was dead.
+    return `No route ${route} departures in the next day. Other routes may still serve this stop.`;
   }
   return "No departures in the next day. This stop may be out of service.";
 }
@@ -759,11 +886,26 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
   });
   card.setAttribute("role", "listitem");
 
-  // One line, most important first: anything that will not fit is clipped
-  // rather than wrapped, so the card never changes height.
+  // Most important first, and anything that will not fit is clipped rather than
+  // wrapped, so the card does not change height as live data comes and goes. The
+  // route buttons at the end are the exception: they wrap, because a button that
+  // has been clipped off the edge is an option the rider cannot take.
   const meta = element("div", { className: "stop-meta" }, [
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
+  const routeChips = renderStopRoutes(saved);
+  const watchedRoute = savedRouteLabel(saved);
+  // Only when there are no chips to say it: with them, the selected one is
+  // already the answer and a second copy on the same line is just noise.
+  if (watchedRoute && !routeChips) {
+    meta.append(
+      element("span", {
+        className: "meta-route",
+        text: watchedRoute,
+        title: `This card follows route ${watchedRoute} only`,
+      }),
+    );
+  }
   if (isNearest) {
     meta.append(element("span", { className: "stop-tag", text: "Closest" }));
   }
@@ -777,6 +919,8 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       }),
     );
   }
+  // Last, so the facts about the stop read first and the controls trail them.
+  if (routeChips) meta.append(routeChips);
 
   card.append(
     element("div", { className: "stop-head" }, [
@@ -800,7 +944,9 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
     );
     card.append(list);
   } else {
-    card.append(element("p", { className: "stop-empty", text: stopEmptyMessage(board) }));
+    card.append(
+      element("p", { className: "stop-empty", text: stopEmptyMessage(board, saved) }),
+    );
   }
 
   return card;
@@ -821,20 +967,26 @@ function displayOrder(): SavedStop[] {
   return [nearest, ...stops];
 }
 
+/**
+ * The boards behind the cards, in display order.
+ *
+ * Separate from rendering them so a refresh that has to leave the list alone can
+ * still report on it: the status line reads from these.
+ */
+function stopBoards(): { saved: SavedStop; board: DepartureBoard }[] {
+  if (!state.index || state.savedStops.length === 0) return [];
+  return displayOrder().map((saved) => ({ saved, board: boardFor(saved) }));
+}
+
 function renderStops(): DepartureBoard[] {
   el.skeleton.hidden = !state.loading || Boolean(state.index);
   const hasStops = state.savedStops.length > 0;
   el.emptyState.hidden = !state.index || hasStops;
-  el.stopList.replaceChildren();
-  if (!state.index || !hasStops) return [];
-
-  const boards: DepartureBoard[] = [];
-  for (const saved of displayOrder()) {
-    const board = boardFor(saved);
-    boards.push(board);
-    el.stopList.append(renderStopCard(saved, board));
-  }
-  return boards;
+  const entries = stopBoards();
+  el.stopList.replaceChildren(
+    ...entries.map(({ saved, board }) => renderStopCard(saved, board)),
+  );
+  return entries.map((entry) => entry.board);
 }
 
 /** Cheap in-place refresh of the time labels between data loads. */
@@ -869,61 +1021,160 @@ function tickCountdowns(): void {
  * Rendering: stop picker
  * ------------------------------------------------------------------ */
 
-function savedStopIds(): Set<string> {
-  return new Set(state.savedStops.map((saved) => saved.stopId));
+function savedStopFor(stopId: string): SavedStop | undefined {
+  return state.savedStops.find((saved) => saved.stopId === stopId);
 }
 
-function resultItem(
-  stop: Stop,
-  options: { distanceMeters?: number; routeIds?: string[] },
-): HTMLElement {
-  const saved = savedStopIds().has(stop.id);
-  const routes = options.routeIds ?? state.index?.routeIdsByStop.get(stop.id) ?? [];
+function routeFor(routeId: string): Route | undefined {
+  const routeIndex = state.index?.routeIndexById.get(routeId);
+  return routeIndex === undefined ? undefined : state.index?.routes[routeIndex];
+}
+
+/** Routes serving a stop, in the feed's display order. */
+function routesAt(stop: Stop, routeIds?: string[]): string[] {
+  return routeIds ?? state.index?.routeIdsByStop.get(stop.id) ?? [];
+}
+
+function paintRouteChip(chip: HTMLElement, routeId: string): void {
+  const route = routeFor(routeId);
+  const color = route ? routeBadgeColor(route) : undefined;
+  if (color) {
+    chip.style.backgroundColor = color;
+    chip.style.color = "#fff";
+  }
+}
+
+interface ResultItemOptions {
+  distanceMeters?: number;
+  routeIds?: string[];
+  /** The route being browsed in the route tab, if any. */
+  browsingRouteId?: string;
+}
+
+/**
+ * The route a press on the row itself saves: the one being browsed if there is
+ * one, otherwise the first at the stop.
+ *
+ * Choosing a route and then walking its stops is a rider saying which bus they
+ * want, so the row takes them at their word rather than reverting to whichever
+ * route the feed happens to list first. "Any" is never the default — someone at a
+ * stop is waiting for a bus, not for all of them — but it stays one press away.
+ */
+function defaultRouteAt(
+  routes: readonly string[],
+  browsing?: string,
+): string | undefined {
+  if (browsing && routes.includes(browsing)) return browsing;
+  return routes[0];
+}
+
+/**
+ * A stop in the picker: its name and code, then one button per route it serves.
+ *
+ * The route numbers are the save action rather than decoration on a row that
+ * saves the whole stop. Riders are waiting for one particular bus, so the number
+ * they came here for and the thing they press are the same object, and every
+ * option is labelled — there is no press whose meaning has to be inferred.
+ */
+function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
+  const routes = routesAt(stop, options.routeIds);
+  const saved = savedStopFor(stop.id);
+  // `undefined` for a stop that is not saved, `""` for one saved without a route.
+  const current = saved ? (saved.routeId ?? "") : undefined;
+  const fallback = defaultRouteAt(routes, options.browsingRouteId);
+
   const meta = element("div", { className: "result-meta" }, [
     element("span", { text: `Stop ${stop.code}` }),
     options.distanceMeters !== undefined
       ? element("span", { text: formatDistance(options.distanceMeters) })
       : undefined,
   ]);
-  if (routes.length > 0) {
-    meta.append(
-      element(
-        "span",
-        { className: "result-routes" },
-        routes.slice(0, 6).map((routeId) => {
-          const routeIndex = state.index?.routeIndexById.get(routeId);
-          const route = routeIndex === undefined ? undefined : state.index?.routes[routeIndex];
-          const chip = element("span", {
-            className: "result-route",
-            text: route?.shortName ?? routeId,
-          });
-          const color = route ? routeBadgeColor(route) : undefined;
-          if (color) {
-            chip.style.backgroundColor = color;
-            chip.style.color = "#fff";
-          }
-          return chip;
-        }),
-      ),
+
+  // Every route is offered, not the first six: each one is a button, and a hidden
+  // button is an option the rider cannot take.
+  const chips = element("div", { className: "result-routes" });
+  chips.setAttribute("role", "group");
+  chips.setAttribute("aria-label", `Route to follow at ${stop.name}`);
+  for (const routeId of routes) {
+    const route = routeFor(routeId);
+    const shortName = route?.shortName ?? routeId;
+    const isCurrent = current === routeId;
+    // Marked so a press on the row is predictable without having to hover it.
+    const isDefault = !isCurrent && routeId === fallback;
+    const chip = button(
+      `result-route${isCurrent ? " is-current" : ""}${isDefault ? " is-default" : ""}`,
+      {
+        text: shortName,
+        title: isCurrent
+          ? "Already the route for this saved stop"
+          : isDefault
+            ? `${route?.longName ?? `Route ${shortName}`} · pressing the row saves this`
+            : (route?.longName ?? `Route ${shortName}`),
+        ariaLabel: isCurrent
+          ? `${stop.name} already follows route ${shortName}`
+          : `Save route ${shortName} at ${stop.name}`,
+        onClick: () => void saveStop(stop, routeId),
+      },
     );
+    chip.disabled = isCurrent;
+    if (!isCurrent) paintRouteChip(chip, routeId);
+    chips.append(chip);
   }
 
-  const action = button(
-    "result-item",
-    {
-      ariaLabel: saved ? `${stop.name} is already saved` : `Save ${stop.name}`,
+  // Offered where it means something different from the routes beside it. At a
+  // stop with one route the two are the same answer, and a second button saying
+  // so is a choice the rider has to think about for nothing — unless it is what
+  // the stop is already following, which has to stay visible.
+  if (routes.length !== 1 || current === "") {
+    const isCurrent = current === "";
+    const anyChip = button(`result-route is-any${isCurrent ? " is-current" : ""}`, {
+      text: "Any",
+      title: isCurrent
+        ? "Already following every route here"
+        : "One card for whichever bus comes next",
+      ariaLabel: isCurrent
+        ? `${stop.name} already follows every route`
+        : `Save every route at ${stop.name}`,
       onClick: () => void saveStop(stop),
-    },
-    [
-      element("div", { className: "result-copy" }, [
-        element("p", { className: "result-name", text: stop.name }),
-        meta,
-      ]),
-      element("span", { className: "result-add", text: saved ? "✓" : "+" }),
-    ],
-  );
-  action.disabled = saved;
-  return element("li", {}, [action]);
+    });
+    anyChip.disabled = isCurrent;
+    chips.append(anyChip);
+  }
+
+  // On the meta line rather than a line of their own: they are short, and the
+  // code and distance beside them leave room for four or five before anything
+  // has to wrap.
+  meta.append(chips);
+
+  const entry = element("div", { className: "result-entry" }, [
+    element("p", { className: "result-name", text: stop.name, title: stop.name }),
+    meta,
+  ]);
+
+  /*
+   * The whole box takes the default route, so the common case is a press
+   * anywhere rather than aim at a small number.
+   *
+   * A plain click handler rather than a button, because the route chips are
+   * buttons and cannot be nested inside one. Nothing is keyboard-only as a
+   * result: the default route has its own chip in this row, so every action here
+   * is reachable by tab. Only wired up when it would change something, so the box
+   * does not offer a press that does nothing.
+   */
+  if (current !== (fallback ?? "")) {
+    const label = fallback
+      ? `Save route ${routeFor(fallback)?.shortName ?? fallback} at ${stop.name}`
+      : `Save ${stop.name}`;
+    entry.classList.add("is-pressable");
+    entry.title = label;
+    entry.addEventListener("click", (event) => {
+      // A chip speaks for itself.
+      if ((event.target as HTMLElement).closest("button")) return;
+      void saveStop(stop, fallback);
+    });
+  }
+
+  return element("li", { className: "result-row" }, [entry]);
 }
 
 function searchStops(term: string): Stop[] {
@@ -1026,7 +1277,9 @@ function renderRoutePane(): void {
       const stop = stopsById.get(stopId);
       if (!stop) return [];
       const routeIds = state.index?.routeIdsByStop.get(stopId) ?? [];
-      return [resultItem(stop, { routeIds })];
+      // Browsing a route is a rider naming the bus they want, so it becomes what
+      // a press on the row saves rather than the feed's first route at the stop.
+      return [resultItem(stop, { routeIds, browsingRouteId: state.selectedRouteId })];
     }),
   );
 }
@@ -1129,6 +1382,7 @@ function renderPlan(): void {
   }
 
   el.planPrice.hidden = false;
+  renderPlanPrice();
   el.upgradeButton.textContent = "Get Pro";
   el.restoreButton.textContent = "Already purchased? Restore";
   el.planTitle.textContent = "Catch your bus without checking";
@@ -1138,7 +1392,44 @@ function renderPlan(): void {
     ? "Checkout is not configured in this build."
     : state.paymentUnavailable
       ? "Your plan status could not be checked. Try again when you are back online."
-      : "Monthly or yearly. Saved stops keep working either way.";
+      : "Saved stops keep working either way.";
+}
+
+/**
+ * The price line, from whatever ExtensionPay said.
+ *
+ * Three states, all of them honest: nothing yet while the request is in flight,
+ * the real amounts once they arrive, and a plain sentence pointing at checkout if
+ * they never do. There is deliberately no fourth state where a number compiled
+ * into this build stands in for one it cannot confirm.
+ */
+function renderPlanPrice(): void {
+  const plans = state.plans;
+  el.planPrice.replaceChildren();
+
+  if (plans === undefined) {
+    el.planPrice.classList.add("is-loading");
+    el.planPrice.append(element("span", { text: "Checking the current price…" }));
+    return;
+  }
+
+  el.planPrice.classList.remove("is-loading");
+
+  if (plans.length === 0) {
+    el.planPrice.append(
+      element("span", { text: "The price and billing period are shown at checkout." }),
+    );
+    return;
+  }
+
+  plans.forEach((plan, index) => {
+    const offer = describePlan(plan);
+    if (index > 0) el.planPrice.append(element("em", { text: "or" }));
+    el.planPrice.append(
+      element("strong", { text: offer.amount }),
+      element("span", { text: offer.period }),
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1163,12 +1454,36 @@ function restoreFocus(focusKey: string | undefined): void {
   target?.focus();
 }
 
-function render(): void {
+/**
+ * True while a native dropdown is open somewhere in the popup.
+ *
+ * A `<select>` holds focus for as long as its menu is up, and rebuilding the
+ * markup around it — or even reassigning its value — closes that menu.
+ */
+function menuIsOpen(): boolean {
+  return document.activeElement instanceof HTMLSelectElement;
+}
+
+/**
+ * `background: true` marks a refresh nobody asked for: the realtime poll, an
+ * expiring status message, a change synced from another window.
+ *
+ * Those used to rebuild the stop list and the picker underneath an open menu,
+ * which shut it the instant it was opened — a route menu only has to be up for a
+ * second to be caught by a poll that runs every twenty-five. Background
+ * refreshes now leave both regions alone while a menu is open. Nothing goes
+ * stale: the countdowns are updated in place on their own timer, the status line
+ * still refreshes, and the next thing the rider does rebuilds the rest.
+ */
+function render(options: { background?: boolean } = {}): void {
   const focusKey = captureFocusKey();
-  const boards = renderStops();
+  const keepMenuOpen = Boolean(options.background) && menuIsOpen();
+  const boards = keepMenuOpen
+    ? stopBoards().map((entry) => entry.board)
+    : renderStops();
   renderFeedLine(boards);
   renderAlerts();
-  renderPicker();
+  if (!keepMenuOpen) renderPicker();
   renderSettings();
   renderPlan();
 
@@ -1207,20 +1522,50 @@ async function afterStopsChanged(stops: SavedStop[]): Promise<void> {
   }
 }
 
-async function saveStop(stop: Stop): Promise<void> {
+/**
+ * Saves a stop for one route, or moves an already-saved stop onto that route.
+ *
+ * A stop is one place and gets one card, so pressing a route at a stop that is
+ * already on the list points that card at the new route rather than adding a
+ * second one beside it.
+ */
+async function saveStop(stop: Stop, routeId?: string): Promise<void> {
+  const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
+  const moved = Boolean(savedStopFor(stop.id));
   try {
     const stops = await addSavedStop({
       stopId: stop.id,
       stopCode: stop.code,
       stopName: stop.name,
+      ...(routeId ? { routeId } : {}),
+      ...(shortName ? { routeShortName: shortName } : {}),
     });
     state.pickerOpen = false;
     state.searchTerm = "";
     el.stopSearch.value = "";
     await afterStopsChanged(stops);
-    flashStatus("Stop saved");
+    const route = routeId ? `route ${shortName ?? routeId}` : "every route";
+    flashStatus(
+      moved ? `Now following ${route} · ${stop.name}` : `Saved · ${route} at ${stop.name}`,
+    );
   } catch (error) {
     flashStatus(errorMessage(error, "Could not save that stop."), "error");
+  }
+}
+
+/** Changes which route a saved card follows, or widens it back to every route. */
+async function changeStopRoute(saved: SavedStop, routeId: string): Promise<void> {
+  try {
+    const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
+    const stops = await setStopRoute(saved.id, routeId || undefined, shortName);
+    await afterStopsChanged(stops);
+    flashStatus(
+      routeId
+        ? `Following route ${shortName ?? routeId} · ${saved.stopName}`
+        : `Following every route · ${saved.stopName}`,
+    );
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not change that route."), "error");
   }
 }
 
@@ -1297,7 +1642,13 @@ async function findNearbyStops(): Promise<void> {
   try {
     const position = await getCurrentPosition();
     await setLocationConsent(true);
-    await saveLastLocation(position.coords.latitude, position.coords.longitude);
+    // Accuracy travels with the position: without it a kilometre-wide fix would
+    // later be treated as pinpoint when picking the closest stop.
+    await saveLastLocation(
+      position.coords.latitude,
+      position.coords.longitude,
+      position.coords.accuracy,
+    );
     state.nearbyStops = state.index
       ? nearestStops(
           state.index.stops,
@@ -1333,7 +1684,11 @@ async function toggleNearestFirst(enabled: boolean): Promise<void> {
     try {
       const position = await getCurrentPosition();
       await setLocationConsent(true);
-      await saveLastLocation(position.coords.latitude, position.coords.longitude);
+      await saveLastLocation(
+        position.coords.latitude,
+        position.coords.longitude,
+        position.coords.accuracy,
+      );
     } catch (error) {
       el.nearestToggle.checked = false;
       flashStatus(
@@ -1364,6 +1719,9 @@ function openPlan(): void {
   state.planOpen = true;
   render();
   el.planClose.focus();
+  // Fire and forget: the card is already on screen, and it re-renders itself when
+  // the answer lands.
+  void loadPlans();
 }
 
 function closePlan(): void {
@@ -1601,7 +1959,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
       state.settings = await getSettings();
       applyTheme();
     }
-    render();
+    render({ background: true });
   })();
 });
 

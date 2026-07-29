@@ -96,18 +96,36 @@ export interface GtfsIndex {
   patterns: Map<string, RoutePattern>;
 }
 
-/** A rider's saved stop. Its card shows whichever bus comes next. */
+/**
+ * A rider's saved stop, optionally narrowed to a single route. One per stop.
+ *
+ * Most riders are waiting for one particular bus, so `routeId` is what the card,
+ * the badge, and the arrival alert all filter on. Leaving it unset keeps the
+ * older behaviour — whichever bus comes next — which is what every stop saved
+ * before this field existed does, and what a rider who really does take the
+ * first thing that shows up wants.
+ */
 export interface SavedStop {
   id: string;
   stopId: string;
   stopCode: string;
   stopName: string;
+  /** When set, only this route counts for this entry. */
+  routeId?: string;
+  /**
+   * Denormalised so the card can name the route before the feed has loaded, the
+   * same reason `stopName` is stored. The live feed wins whenever it is around,
+   * so a route GRT has since renamed corrects itself.
+   */
+  routeShortName?: string;
   createdAt: number;
   /** Manual sort position; lower comes first. */
   position: number;
   alertsEnabled?: boolean;
   alertLeadMinutes?: number;
 }
+
+
 
 export interface Settings {
   theme: "auto" | "light" | "dark";

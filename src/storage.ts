@@ -2,9 +2,14 @@
  * Saved stops and rider settings, kept in `chrome.storage.sync` so they follow
  * the rider between browsers.
  *
- * Earlier versions stored one entry per route + direction + stop. A GRT stop
- * only serves one direction of travel, so those entries are collapsed into a
- * single saved stop with a route filter on first read.
+ * One entry per stop, holding the route the rider is waiting for there. A stop is
+ * one place, so two entries for it would be two cards with the same name and the
+ * same code, each carrying a route selector that only spoke for one of them —
+ * asking a rider to tell them apart by reading their departures. Choosing a
+ * different route at a stop already saved moves that stop's entry instead.
+ *
+ * Entries written by the very first version were per route + direction + stop and
+ * are collapsed on first read, as are any duplicates an older build let through.
  */
 
 import {
@@ -37,6 +42,17 @@ function normalize(stop: SavedStop, fallbackPosition: number): SavedStop {
     stopId: stop.stopId,
     stopCode: stop.stopCode || stop.stopId,
     stopName: stop.stopName,
+    // An empty string would read as a route filter that matches nothing, so it
+    // is dropped back to "every route" along with a missing value.
+    ...(typeof stop.routeId === "string" && stop.routeId
+      ? { routeId: stop.routeId }
+      : {}),
+    ...(typeof stop.routeId === "string" &&
+    stop.routeId &&
+    typeof stop.routeShortName === "string" &&
+    stop.routeShortName
+      ? { routeShortName: stop.routeShortName }
+      : {}),
     createdAt: typeof stop.createdAt === "number" ? stop.createdAt : Date.now(),
     position:
       typeof stop.position === "number" && Number.isFinite(stop.position)
@@ -82,6 +98,29 @@ function sortStops(stops: SavedStop[]): SavedStop[] {
 }
 
 /**
+ * Collapses repeats of a stop, keeping the one the rider put first.
+ *
+ * Applied on every read rather than once behind a version check, so a list that
+ * arrives over sync from a browser still running an older build is cleaned up
+ * here too. Alerts survive the collapse: having asked to be told about a bus at
+ * this stop is not something to lose quietly.
+ */
+function collapseByStop(stops: SavedStop[]): SavedStop[] {
+  const byStopId = new Map<string, SavedStop>();
+  for (const stop of stops) {
+    const kept = byStopId.get(stop.stopId);
+    if (!kept) {
+      byStopId.set(stop.stopId, stop);
+      continue;
+    }
+    if (stop.alertsEnabled && !kept.alertsEnabled) {
+      byStopId.set(stop.stopId, { ...kept, alertsEnabled: true });
+    }
+  }
+  return [...byStopId.values()];
+}
+
+/**
  * Writes the list exactly as given: array order is the truth, and `position`
  * is only a way to carry that order through storage. Sorting here would undo
  * any reordering the caller just did.
@@ -96,7 +135,10 @@ export async function getSavedStops(): Promise<SavedStop[]> {
   const stored = await chrome.storage.sync.get([SAVED_STOPS_KEY, LEGACY_WATCHES_KEY]);
   const raw = stored[SAVED_STOPS_KEY];
   if (Array.isArray(raw)) {
-    return sortStops(raw.filter(isSavedStop).map(normalize));
+    const stops = collapseByStop(sortStops(raw.filter(isSavedStop).map(normalize)));
+    // Written back only when the collapse actually dropped something, so the
+    // common read does not turn into a write and wake every other listener.
+    return stops.length === raw.length ? stops : persist(stops);
   }
 
   const migrated = migrateLegacyWatches(stored[LEGACY_WATCHES_KEY]);
@@ -110,25 +152,59 @@ export interface NewSavedStop {
   stopId: string;
   stopCode: string;
   stopName: string;
+  /** Omit to watch every route at the stop. */
+  routeId?: string;
+  routeShortName?: string;
 }
 
+function savedStopFor(stops: readonly SavedStop[], stopId: string): SavedStop | undefined {
+  return stops.find((stop) => stop.stopId === stopId);
+}
+
+/**
+ * Adds a stop, or points an already-saved one at a different route.
+ *
+ * The two are one call because they are one intention: pressing a route at a
+ * stop means "this is the bus I am waiting for here", whether or not the stop
+ * was on the list already.
+ */
 export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
   const stops = await getSavedStops();
-  if (stops.some((candidate) => candidate.stopId === stop.stopId)) return stops;
+  const existing = savedStopFor(stops, stop.stopId);
+  if (existing) {
+    return setStopRoute(existing.id, stop.routeId, stop.routeShortName);
+  }
   if (stops.length >= MAX_SAVED_STOPS) {
     throw new Error(`You can save up to ${MAX_SAVED_STOPS} stops.`);
   }
   return persist([
     ...stops,
-    {
-      id: crypto.randomUUID(),
-      stopId: stop.stopId,
-      stopCode: stop.stopCode,
-      stopName: stop.stopName,
-      createdAt: Date.now(),
-      position: stops.length,
-    },
+    normalize(
+      {
+        id: crypto.randomUUID(),
+        stopId: stop.stopId,
+        stopCode: stop.stopCode,
+        stopName: stop.stopName,
+        ...(stop.routeId ? { routeId: stop.routeId } : {}),
+        ...(stop.routeShortName ? { routeShortName: stop.routeShortName } : {}),
+        createdAt: Date.now(),
+        position: stops.length,
+      },
+      stops.length,
+    ),
   ]);
+}
+
+/**
+ * Narrows an entry to one route, or widens it back to every route when
+ * `routeId` is omitted.
+ */
+export async function setStopRoute(
+  id: string,
+  routeId?: string,
+  routeShortName?: string,
+): Promise<SavedStop[]> {
+  return updateSavedStop(id, { routeId, routeShortName });
 }
 
 export async function removeSavedStop(id: string): Promise<SavedStop[]> {
@@ -139,7 +215,7 @@ export async function removeSavedStop(id: string): Promise<SavedStop[]> {
 /** Puts a previously removed stop back, keeping its original position. */
 export async function restoreSavedStop(stop: SavedStop): Promise<SavedStop[]> {
   const stops = await getSavedStops();
-  if (stops.some((candidate) => candidate.stopId === stop.stopId)) return stops;
+  if (savedStopFor(stops, stop.stopId)) return stops;
   const restored = [...stops];
   restored.splice(Math.min(stop.position, restored.length), 0, stop);
   return persist(restored);

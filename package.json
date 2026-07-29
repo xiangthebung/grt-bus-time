@@ -5,9 +5,17 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
-    "build:free": "tsc --noEmit && BUILD_CHANNEL=free vite build",
+    "build:free": "tsc --noEmit && vite build --mode free",
     "build:release": "npm run build",
+    "build:all": "npm run build && npm run build:free",
+    "watch": "vite build --watch",
+    "zip": "npm run build && node scripts/package.mjs",
+    "zip:free": "npm run build:free && node scripts/package.mjs --free",
+    "zip:all": "npm run zip && npm run zip:free",
+    "clean": "node -e \"for (const d of ['dist','dist-free','artifacts']) fs.rmSync(d,{recursive:true,force:true})\"",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "verify": "npm run typecheck && npm run test && npm run build:all",
     "dev": "vite"
   },
   "dependencies": {

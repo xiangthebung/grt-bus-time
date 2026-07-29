@@ -1,4 +1,5 @@
 import ExtPay from "extpay";
+import { usablePlans, type Plan } from "./plans";
 import { IS_PRO_BUILD } from "./pro";
 
 declare const __EXTPAY_EXTENSION_ID__: string;
@@ -25,6 +26,16 @@ export function startPaymentBackground(): void {
 
 export async function getPaymentUser(): Promise<Awaited<ReturnType<ExtPayClient["getUser"]>> | undefined> {
   return createClient()?.getUser();
+}
+
+/**
+ * The plans as configured in ExtensionPay, which is the same source the checkout
+ * page prices from. Returns an empty list rather than throwing when payments are
+ * not configured, so callers can treat "no plans" as one situation.
+ */
+export async function getPaymentPlans(): Promise<Plan[]> {
+  const plans = await createClient()?.getPlans();
+  return usablePlans(plans ?? []);
 }
 
 export async function openPaymentPage(): Promise<void> {

@@ -4,14 +4,28 @@ import { fileURLToPath, URL } from "node:url";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 const buildEnv = loadEnv("production", projectRoot, "");
-const isFreeBuild = process.env.BUILD_CHANNEL === "free" || buildEnv.BUILD_CHANNEL === "free";
-const isProBuild = !isFreeBuild;
 const extensionPayId =
   process.env.EXTPAY_EXTENSION_ID?.trim() || buildEnv.EXTPAY_EXTENSION_ID?.trim() || "grt-next-bus";
-const outputDirectory = `${projectRoot}/${isFreeBuild ? "dist-free" : "dist"}`;
 const freePaymentModule = fileURLToPath(new URL("./src/payments.free.ts", import.meta.url));
 
-export default defineConfig({
+/**
+ * The free channel is selected with `vite build --mode free`.
+ *
+ * It used to be a `BUILD_CHANNEL=free` prefix on the npm script, which is shell
+ * syntax that cmd.exe and PowerShell do not understand — `npm run build:free`
+ * failed before Vite even started on Windows. `--mode` is a Vite flag, so it
+ * behaves the same everywhere. The environment variable is still honoured so any
+ * existing CI invocation keeps working.
+ */
+export default defineConfig(({ mode }) => {
+const isFreeBuild =
+  mode === "free" ||
+  process.env.BUILD_CHANNEL === "free" ||
+  buildEnv.BUILD_CHANNEL === "free";
+const isProBuild = !isFreeBuild;
+const outputDirectory = `${projectRoot}/${isFreeBuild ? "dist-free" : "dist"}`;
+
+return {
   root: `${projectRoot}/src`,
   publicDir: `${projectRoot}/public`,
   base: "./",
@@ -42,7 +56,9 @@ export default defineConfig({
           manifest.name = "GRT Next Bus";
           manifest.description =
             "Live Grand River Transit departures for your saved stops, with optional Pro countdowns, alerts, and closest-stop ordering.";
-          manifest.permissions = ["storage", "alarms", "geolocation"];
+          // `offscreen` is how the service worker reaches navigator.geolocation
+          // for the closest-stop badge; only the Pro build has a badge.
+          manifest.permissions = ["storage", "alarms", "geolocation", "offscreen"];
           manifest.optional_permissions = ["notifications"];
           manifest.host_permissions = [
             "https://webapps.regionofwaterloo.ca/*",
@@ -78,6 +94,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: `${projectRoot}/src/popup.html`,
+        // Only the Pro build shows a badge, so only it needs the location helper.
+        ...(isProBuild ? { offscreen: `${projectRoot}/src/offscreen.html` } : {}),
         background: `${projectRoot}/src/background.ts`,
       },
       output: {
@@ -87,4 +105,5 @@ export default defineConfig({
       },
     },
   },
+};
 });

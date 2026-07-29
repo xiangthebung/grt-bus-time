@@ -9,6 +9,10 @@ export async function getPaymentUser(): Promise<undefined> {
   return undefined;
 }
 
+export async function getPaymentPlans(): Promise<[]> {
+  return [];
+}
+
 export async function openPaymentPage(): Promise<void> {
   throw new Error("Pro payments are not available in the Free build.");
 }

@@ -26,6 +26,7 @@
   --warn-soft: #fdf0e2;
   --danger: #b6382f;
   --danger-soft: #fdeeec;
+  --scroll-thumb: rgba(72, 96, 103, 0.3);
   --shadow-card: 0 1px 2px rgba(18, 44, 48, 0.05), 0 6px 20px rgba(18, 44, 48, 0.05);
   --shadow-float: 0 18px 44px rgba(11, 33, 37, 0.24);
   --radius-lg: 16px;
@@ -60,6 +61,7 @@
   --warn-soft: #33261a;
   --danger: #f08d84;
   --danger-soft: #3a1e1c;
+  --scroll-thumb: rgba(182, 199, 203, 0.26);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-float: 0 18px 44px rgba(0, 0, 0, 0.55);
   --focus: 0 0 0 3px rgba(82, 207, 190, 0.32);
@@ -77,6 +79,19 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+}
+
+/*
+ * Scrollbars.
+ *
+ * Chrome's default is a wide bar with a shaded track and stepper arrows, which
+ * in a 420px panel reads as browser furniture sitting on top of the content.
+ * Both properties inherit, so declaring them once here covers the popup itself
+ * and every scrolling region inside it.
+ */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
 }
 
 body {
@@ -737,8 +752,8 @@ ul {
 .stop-meta {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin-top: 5px;
+  gap: 6px;
+  margin-top: 4px;
   overflow: hidden;
   color: var(--text-muted);
   font-size: 10.5px;
@@ -747,8 +762,21 @@ ul {
 }
 
 .stop-meta .meta-code,
+.stop-meta .meta-route,
 .stop-meta .stop-tag {
   flex: 0 0 auto;
+}
+
+/* The route this card follows. Filled rather than tinted like `.stop-tag`,
+   because it is the answer to "which bus is this?" and not a side note. */
+.meta-route {
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .stop-meta .meta-distance {
@@ -844,6 +872,59 @@ ul {
 
 .lead-select.is-reserved {
   visibility: hidden;
+}
+
+/* ------------------------------------------------------------------ *
+ * Route this card follows
+ *
+ * Buttons rather than a menu: the set is short, so showing all of it saves two
+ * presses. They share the meta line with the stop code, which keeps the cost at
+ * a few pixels of line height instead of a whole row per card. Wrapping, not
+ * scrolling — a terminal stop with ten routes should make one card taller, not
+ * hide half the answer behind a sideways scroll nobody notices.
+ * ------------------------------------------------------------------ */
+
+.stop-routes {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.stop-route {
+  min-width: 24px;
+  min-height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 9.5px;
+  font-weight: 800;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.stop-route:not(.is-active):hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+
+/*
+ * The selected one is filled, so which bus the card is counting down is legible
+ * at a glance rather than by comparing outlines.
+ *
+ * Pressing it does nothing — it is already the answer — so it does not offer to
+ * be pressed: no pointer, no hover change. It stays focusable rather than
+ * disabled, because in a radio group the current value is what a keyboard should
+ * be able to land on and read.
+ */
+.stop-route.is-active {
+  cursor: default;
+  color: var(--accent-contrast);
+  border-color: transparent;
+  background: var(--accent);
 }
 
 .departures {
@@ -1235,44 +1316,35 @@ ul {
 
 .result-list {
   display: flex;
-  max-height: 244px;
+  max-height: 256px;
   flex-direction: column;
   gap: 5px;
   margin-top: 11px;
   overflow-y: auto;
-  scrollbar-width: thin;
 }
 
 .result-list:empty {
   display: none;
 }
 
-.result-item {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
+.result-entry {
+  padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   text-align: left;
+}
+
+/* Carries the default-route press. Absent on a row whose default is already what
+   the stop follows, so the box never lights up for a press that does nothing. */
+.result-entry.is-pressable {
+  cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.result-item:hover {
+.result-entry.is-pressable:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   background: var(--accent-soft);
-}
-
-.result-item:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-
-.result-copy {
-  flex: 1;
-  min-width: 0;
 }
 
 .result-name {
@@ -1293,27 +1365,76 @@ ul {
   font-size: 10.5px;
 }
 
+/* Rides on the meta line after the stop code and distance, wrapping onto a
+   second line only at stops with more routes than will fit. */
 .result-routes {
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   flex-wrap: wrap;
-  gap: 3px;
+  gap: 4px;
 }
 
+/* Sized as something to press, not as a label — the old chips were 9px text in a
+   1px box, which read fine and hit badly — but no bigger than that needs to be,
+   since a row of them sits on every result. */
 .result-route {
-  padding: 1px 5px;
-  border-radius: 4px;
+  min-width: 26px;
+  min-height: 22px;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: var(--accent-contrast);
   background: var(--accent);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 800;
+  transition: filter 0.15s ease, border-color 0.15s ease;
 }
 
-.result-add {
-  flex: 0 0 auto;
+/* Only the ones still on offer react to the pointer. */
+.result-route:not(.is-current):hover {
+  filter: brightness(1.12);
+}
+
+.result-route:not(.is-current):active {
+  filter: brightness(0.94);
+}
+
+/* What a press on the row saves — the browsed route in the route tab, the stop's
+   first route otherwise. Ringed so the box press is predictable at a glance, and
+   so a rider walking a route's stops sees the same number marked on every row. */
+.result-route.is-default {
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--text);
+}
+
+/* "Any" is a different kind of answer, so it does not wear a route's colour. */
+.result-route.is-any {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: transparent;
+}
+
+.result-route.is-any:not(.is-current):hover {
   color: var(--accent);
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  filter: none;
+}
+
+/*
+ * The route this stop already follows.
+ *
+ * Tinted rather than struck through: it is the current answer, not something
+ * unavailable. The chips beside it stay filled because they are still offers —
+ * inverted from the card, where one filled chip among outlines reads as the
+ * selection, because there every chip is a selection and here only this one is.
+ */
+.result-route.is-current {
+  cursor: default;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-soft);
+  filter: none;
 }
 
 .result-empty {
@@ -1349,7 +1470,6 @@ ul {
   border-radius: 20px;
   background: var(--surface);
   box-shadow: var(--shadow-float);
-  scrollbar-width: thin;
 }
 
 .plan-close {
@@ -1449,6 +1569,19 @@ ul {
 .plan-price em {
   margin: 0 4px;
   font-style: normal;
+}
+
+/* The price arrives from ExtensionPay a moment after the card opens, and the
+   fallback line is a sentence rather than an amount. Both need to wrap, which a
+   row of baseline-aligned amounts does not. */
+.plan-price {
+  flex-wrap: wrap;
+  row-gap: 2px;
+  line-height: 1.45;
+}
+
+.plan-price.is-loading {
+  color: var(--text-muted);
 }
 
 .plan-actions {
