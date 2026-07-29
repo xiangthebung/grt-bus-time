@@ -1,0 +1,35 @@
+name: verify
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: typecheck + tests + both channels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # `verify` is typecheck, then the tests, then `build:all` -- which builds the
+      # paid channel and the free one. Both are built here because they are
+      # separate Vite modes producing separate artefacts, and a mode that stops
+      # compiling is otherwise only discovered when packaging a release.
+      - run: npm run verify
+
+      - run: npm run zip:all
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grt-next-bus-packages
+          path: artifacts/
+          if-no-files-found: error
