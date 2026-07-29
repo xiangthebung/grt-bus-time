@@ -37,6 +37,34 @@ function toNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Reads a numeric field only when the feed actually sent it.
+ *
+ * protobufjs keeps each field's default on the message prototype, so a field that
+ * never arrived still reads back as 0 — `toNumber` is handed a Long of 0 and has
+ * no way to tell that apart from a zero the agency meant. Presence survives
+ * decoding as an own property, which is what this checks.
+ *
+ * The fix for absent values belongs here rather than downstream: the consumers
+ * are already correct for a snapshot that says what it means, and teaching the
+ * alert filter to read `endMs: 0` as "no end" would turn 0 into a sentinel every
+ * future reader of `ServiceAlert` has to know about.
+ *
+ * Use it only where a default of 0 would be a lie, or where 0 is itself a
+ * legitimate value. `schedule_relationship` is neither: GTFS-realtime defines its
+ * default as SCHEDULED, so absent and 0 say the same thing and plain `toNumber`
+ * is right there.
+ */
+function numberIfPresent<T extends object, K extends keyof T & string>(
+  message: T | null | undefined,
+  field: K,
+): number | undefined {
+  if (!message || !Object.prototype.hasOwnProperty.call(message, field)) {
+    return undefined;
+  }
+  return toNumber(message[field]);
+}
+
 async function fetchFeed(url: string): Promise<Uint8Array> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
@@ -72,9 +100,17 @@ function normalizeTripUpdates(feed: transit_realtime.FeedMessage): RealtimeTrip[
     if (!update) continue;
     const descriptor = update.trip;
     const stopTimes = (update.stopTimeUpdate ?? []).flatMap((stopTime) => {
+      // A StopTimeEvent may carry `delay` and no `time`; read as epoch 0 that
+      // becomes a departure in 1970 and the board drops the bus for being in the
+      // past instead of falling back to its scheduled time.
       const time =
-        toNumber(stopTime.departure?.time) ?? toNumber(stopTime.arrival?.time);
-      const sequence = toNumber(stopTime.stopSequence);
+        numberIfPresent(stopTime.departure, "time") ??
+        numberIfPresent(stopTime.arrival, "time");
+      // stop_sequence 0 is a real first stop, so it cannot be spelled the same as
+      // "no sequence given": the board reads the lowest sequence still served to
+      // decide whether the bus is already past this stop, and a fabricated 0
+      // makes every trip look like it is still at the start of its run.
+      const sequence = numberIfPresent(stopTime, "stopSequence");
       const relationship = toNumber(stopTime.scheduleRelationship);
       if (time === undefined && relationship === undefined) return [];
       return [
@@ -103,7 +139,11 @@ function normalizeVehicles(feed: transit_realtime.FeedMessage): RealtimeVehicle[
   for (const entity of feed.entity ?? []) {
     const vehicle = entity.vehicle;
     if (!vehicle?.trip?.tripId) continue;
-    const sequence = toNumber(vehicle.currentStopSequence);
+    // "3 stops away" counts from this, so a vehicle that never reported a stop
+    // sequence has to stay unset: counted from a fabricated 0 it would tell a
+    // rider at an early stop that the bus is nearly there when nobody knows where
+    // it is. A reported 0 is a genuine position — the first stop of the trip.
+    const sequence = numberIfPresent(vehicle, "currentStopSequence");
     const timestamp = toNumber(vehicle.timestamp);
     const lat = toNumber(vehicle.position?.latitude);
     const lon = toNumber(vehicle.position?.longitude);
@@ -198,8 +238,11 @@ function normalizeAlerts(feed: transit_realtime.FeedMessage): ServiceAlert[] {
     }
 
     const period = alert.activePeriod?.[0];
-    const start = toNumber(period?.start);
-    const end = toNumber(period?.end);
+    // An active period with a `start` and no `end` is how an agency says "until
+    // further notice", so an absent bound has to stay absent: as 0 it reads as an
+    // alert that finished in 1970 and `alertsForStop` discards it.
+    const start = numberIfPresent(period, "start");
+    const end = numberIfPresent(period, "end");
     const url = pickTranslation(alert.url);
     alerts.push({
       id: entity.id || `${title}-${start ?? 0}`,

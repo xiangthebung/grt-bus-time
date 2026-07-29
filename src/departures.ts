@@ -141,6 +141,16 @@ export interface DepartureQuery {
   stopId: string;
   limit: number;
   now?: number;
+  /**
+   * When set, only this route's departures are returned.
+   *
+   * Filtering happens while the schedule is being scanned rather than on the
+   * finished board. A stop can be served by a frequent route and an hourly one,
+   * and a board built from the first few departures at the stop could contain
+   * nothing but the frequent route — so filtering afterwards would report the
+   * hourly route as having no service at all.
+   */
+  routeId?: string;
 }
 
 export interface DepartureBoard {
@@ -180,6 +190,10 @@ function collectScheduled(
     const untilSec = Math.floor((now + SEARCH_HORIZON_MS - day.midnightMs) / 1000);
     if (untilSec < 0) continue;
 
+    // The budget is per service day. Counted across all three, a day that filled
+    // it would starve the days after it, and the caller sorts by time afterwards
+    // — so the earliest departure could be missing from the list it sorts.
+    let taken = 0;
     for (
       let position = lowerBound(block.timeSec, Math.max(fromSec, 0));
       position < block.timeSec.length;
@@ -190,6 +204,8 @@ function collectScheduled(
       const tripIndex = block.tripIndex[position];
       if (!services.has(index.tripService[tripIndex])) continue;
       const routeIndex = index.tripRoute[tripIndex];
+      // Before the budget is spent, so another route cannot use it up.
+      if (query.routeId && index.routes[routeIndex].id !== query.routeId) continue;
       candidates.push({
         tripIndex,
         tripId: index.tripIds[tripIndex],
@@ -198,7 +214,8 @@ function collectScheduled(
         scheduledMs: day.midnightMs + timeSec * 1000,
         dateKey: day.dateKey,
       });
-      if (candidates.length >= wanted) break;
+      taken += 1;
+      if (taken >= wanted) break;
     }
   }
 
@@ -276,6 +293,7 @@ function collectUnscheduledDepartures(
     const route = routeIndex !== undefined ? index.routes[routeIndex] : undefined;
     const routeId = route?.id ?? state.trip.routeId;
     if (!routeId) continue;
+    if (query.routeId && routeId !== query.routeId) continue;
     const headsign =
       tripIndex !== undefined
         ? (index.headsigns[index.tripHeadsign[tripIndex]] ?? "")
@@ -387,14 +405,24 @@ export function getDepartureBoard(
   };
 }
 
-/** Service alerts that touch a stop or any of the routes serving it. */
+/**
+ * Service alerts that touch a stop or the routes serving it.
+ *
+ * `routeId` narrows the route half of that to one route, so a rider watching a
+ * single bus is not shown a detour on a route they are not waiting for. Alerts
+ * naming the stop itself still come through either way: those affect them
+ * whichever bus they are there for.
+ */
 export function alertsForStop(
   index: GtfsIndex,
   snapshot: RealtimeSnapshot,
   stopId: string,
+  routeId?: string,
   now = Date.now(),
 ): ServiceAlert[] {
-  const relevantRoutes = new Set(index.routeIdsByStop.get(stopId) ?? []);
+  const relevantRoutes = new Set(
+    routeId ? [routeId] : (index.routeIdsByStop.get(stopId) ?? []),
+  );
   return snapshot.alerts.filter((alert) => {
     if (alert.startMs !== undefined && alert.startMs > now + 60 * 60 * 1000) return false;
     if (alert.endMs !== undefined && alert.endMs < now) return false;
