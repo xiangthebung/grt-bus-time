@@ -1065,25 +1065,47 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
   return routeIds.flatMap((routeId) => {
     const route = routeFor(routeId);
     const shortName = route?.shortName ?? routeId;
+    const title = route?.longName ?? `Route ${shortName}`;
     const directions = directionChoicesAt(stopId, routeId);
-    if (directions.length === 0) {
+    if (directions.length <= 1) {
+      const direction = directions[0];
+      if (direction) {
+        return [
+          {
+            routeId,
+            directionId: direction.directionId,
+            directionHeadsign: direction.headsign || undefined,
+            label: `${shortName} · ${direction.label}`,
+            name: `Route ${shortName}, ${direction.label}`,
+            title: `${title} · ${direction.label}`,
+          },
+        ];
+      }
       return [
         {
           routeId,
           label: shortName,
           name: `Route ${shortName}`,
-          title: route?.longName ?? `Route ${shortName}`,
+          title,
         },
       ];
     }
-    return directions.map((direction) => ({
-      routeId,
-      directionId: direction.directionId,
-      directionHeadsign: direction.headsign || undefined,
-      label: `${shortName} · ${direction.label}`,
-      name: `Route ${shortName}, ${direction.label}`,
-      title: `${route?.longName ?? `Route ${shortName}`} · ${direction.label}`,
-    }));
+    return [
+      {
+        routeId,
+        label: `${shortName} · Any direction`,
+        name: `Route ${shortName}, any direction`,
+        title: `${title} · any direction`,
+      },
+      ...directions.map((direction) => ({
+        routeId,
+        directionId: direction.directionId,
+        directionHeadsign: direction.headsign || undefined,
+        label: `${shortName} · ${direction.label}`,
+        name: `Route ${shortName}, ${direction.label}`,
+        title: `${title} · ${direction.label}`,
+      })),
+    ];
   });
 }
 
@@ -1112,7 +1134,8 @@ function directionLabel(
   return headsign ? `To ${headsign}` : `Direction ${directionId}`;
 }
 
-function savedRouteDescription(saved: SavedStop): string | undefined {
+function savedRouteDescription(saved: SavedStop | undefined): string | undefined {
+  if (!saved) return undefined;
   const route = savedRouteLabel(saved);
   if (!route) return undefined;
   const direction = savedDirectionLabel(saved);
@@ -1137,73 +1160,63 @@ function routeChoiceForSaved(saved: SavedStop | undefined): RouteChoice | undefi
   };
 }
 
-/**
- * Which route and direction the card follows, as buttons rather than a menu.
- *
- * A menu hid the answer behind a press and hid the alternatives behind another
- * one, for a choice that is at most a handful of short numbers. They get their
- * own compact row below the stop metadata so the stop name and distance never
- * compete with route choices for the same horizontal pixels. Only drawn when
- * there is a choice to make — a stop with one route and one direction has none.
- *
- * It also gives every stop saved before routes existed a way in. Those all
- * follow every route, and without this the only route choice would be on stops
- * saved from now on.
- */
-function renderStopRoutes(saved: SavedStop): HTMLElement | undefined {
+const ANY_ROUTE_VALUE = "__any_route__";
+
+function routeSelectionChoicesAt(
+  stopId: string,
+  routeIds: readonly string[],
+  saved?: SavedStop,
+): RouteChoice[] {
+  const choices = routeChoicesAt(stopId, routeIds);
+  const savedChoice = routeChoiceForSaved(saved);
+  if (
+    savedChoice &&
+    !choices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
+  ) {
+    choices.unshift(savedChoice);
+  }
+  return choices;
+}
+
+function anyRouteChoice(): RouteChoice {
+  return {
+    routeId: "",
+    label: "Any route",
+    name: "Every route",
+    title: "Whichever bus comes next",
+  };
+}
+
+function renderStopRouteSelect(saved: SavedStop): HTMLSelectElement | undefined {
   const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
-  const routeChoices = routeChoicesAt(saved.stopId, routeIds);
   const hasDirectionChoices = routeIds.some(
     (routeId) => directionChoicesAt(saved.stopId, routeId).length > 1,
   );
   if (routeIds.length < 2 && !hasDirectionChoices) return undefined;
 
-  // A route the feed has since stopped listing at this stop still gets a chip,
-  // so the card cannot end up following a route with nothing selected.
-  const savedChoice = routeChoiceForSaved(saved);
-  const savedChoiceIsListed = savedChoice
-    ? routeChoices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
-    : false;
-  const options: RouteChoice[] = [
-    { routeId: "", label: "Any", name: "Every route", title: "Whichever bus comes next" },
-    ...(savedChoice && !savedChoiceIsListed ? [savedChoice] : []),
-    ...routeChoices,
-  ];
-
-  const row = element("div", { className: "stop-routes" });
-  row.setAttribute("role", "radiogroup");
-  row.setAttribute("aria-label", `Route and direction followed at ${saved.stopName}`);
-  for (const option of options) {
-    const active = savedChoiceKey(saved) === routeChoiceKey(option);
-    const chip = button(`stop-route${active ? " is-active" : ""}`, {
-      text: option.label,
-      // "This one" rather than the route's long name: on the selected chip the
-      // useful thing to say is why pressing it does nothing.
-      title: active ? "Followed by this card" : option.title,
-      // Named for the option, not for an action. `aria-checked` carries the
-      // state, so a label like "Follow route 31" would promise a press that the
-      // selected chip does not perform.
-      ariaLabel: option.name,
-      dataset: {
-        focusKey: `route:${saved.id}:${option.routeId}:${option.directionId ?? ""}`,
-      },
-      onClick: () => {
-        if (!active) {
-          void changeStopRoute(
-            saved,
-            option.routeId,
-            option.directionId,
-            option.directionHeadsign,
-          );
-        }
-      },
-    });
-    chip.setAttribute("role", "radio");
-    chip.setAttribute("aria-checked", String(active));
-    if (active && option.routeId) paintRouteChip(chip, option.routeId);
-    row.append(chip);
+  const choices = routeSelectionChoicesAt(saved.stopId, routeIds, saved);
+  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
+  const select = element("select", {
+    className: "stop-route-select",
+    ariaLabel: `Route and direction followed at ${saved.stopName}`,
+    dataset: { focusKey: `route-select:${saved.id}` },
+  });
+  select.append(new Option(anyRouteChoice().label, ANY_ROUTE_VALUE));
+  for (const choice of choices) {
+    select.append(new Option(choice.label, routeChoiceKey(choice)));
   }
-  return row;
+  select.value = saved.routeId ? savedChoiceKey(saved) : ANY_ROUTE_VALUE;
+  select.title = savedRouteDescription(saved) ?? "Following every route";
+  select.addEventListener("change", () => {
+    const choice = byValue.get(select.value);
+    void changeStopRoute(
+      saved,
+      choice?.routeId ?? "",
+      choice?.directionId,
+      choice?.directionHeadsign,
+    );
+  });
+  return select;
 }
 
 function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
@@ -1240,16 +1253,16 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
   card.setAttribute("role", "listitem");
 
   // Keep the stop name and metadata readable before the controls. Metadata may
-  // wrap when a narrow panel cannot fit the distance; route choices are placed
-  // in their own row below this block so neither set of facts is clipped.
+  // wrap when a narrow panel cannot fit the distance; the follow selector is
+  // placed in its own row below this block so neither set of facts is clipped.
   const meta = element("div", { className: "stop-meta" }, [
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
-  const routeChips = renderStopRoutes(saved);
+  const routeSelect = renderStopRouteSelect(saved);
   const watchedRoute = savedRouteDescription(saved);
-  // Only when there are no chips to say it: with them, the selected one is
-  // already the answer and a second copy on the same line is just noise.
-  if (watchedRoute && !routeChips) {
+  // Only when there is no selector to say it: with one present, the selected
+  // value is already the answer and a second copy on the same line is noise.
+  if (watchedRoute && !routeSelect) {
     meta.append(
       element("span", {
         className: "meta-route",
@@ -1281,11 +1294,11 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       renderStopTools(saved),
     ]),
   );
-  if (routeChips) {
+  if (routeSelect) {
     card.append(
       element("div", { className: "stop-route-row" }, [
         element("span", { className: "stop-route-label", text: "Follow" }),
-        routeChips,
+        routeSelect,
       ]),
     );
   }
@@ -1428,15 +1441,6 @@ function routesAt(stop: Stop, routeIds?: string[]): string[] {
   return routeIds ?? state.index?.routeIdsByStop.get(stop.id) ?? [];
 }
 
-function paintRouteChip(chip: HTMLElement, routeId: string): void {
-  const route = routeFor(routeId);
-  const color = route ? routeBadgeColor(route) : undefined;
-  if (color) {
-    chip.style.backgroundColor = color;
-    chip.style.color = "#fff";
-  }
-}
-
 interface ResultItemOptions {
   distanceMeters?: number;
   routeIds?: string[];
@@ -1475,28 +1479,13 @@ function defaultRouteChoice(
   return choices[0];
 }
 
-/**
- * A stop in the picker: its name and code, then one button per route/direction
- * choice it serves.
- *
- * The route/destination choices are the save action rather than decoration on a
- * row that saves the whole stop. Riders are waiting for one particular bus, so
- * the choice they came here for and the thing they press are the same object,
- * and every option is labelled — there is no press whose meaning has to be
- * inferred.
- */
+/** A stop in the picker with one compact route/destination selector. */
 function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   const routes = routesAt(stop, options.routeIds);
   const saved = savedStopFor(stop.id);
-  const routeChoices = routeChoicesAt(stop.id, routes);
-  const savedChoice = routeChoiceForSaved(saved);
-  // Preserve a route-only saved entry as an explicit `Any direction` choice
-  // when the current feed offers direction-specific choices for that route.
-  const choices = savedChoice &&
-      !routeChoices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
-    ? [savedChoice, ...routeChoices]
-    : routeChoices;
-  const current = savedChoiceKey(saved);
+  const choices = routeSelectionChoicesAt(stop.id, routes, saved);
+  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
+  const any = anyRouteChoice();
   const fallback = defaultRouteChoice(
     choices,
     options.browsingRouteId,
@@ -1510,96 +1499,56 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
       : undefined,
   ]);
 
-  // Every route/direction choice is offered, not the first six: each one is a
-  // button, and a hidden button is an option the rider cannot take.
-  const chips = element("div", { className: "result-routes" });
-  chips.setAttribute("role", "group");
-  chips.setAttribute("aria-label", `Route and direction to follow at ${stop.name}`);
+  const select = element("select", {
+    className: "result-select",
+    ariaLabel: `Route and direction to follow at ${stop.name}`,
+    dataset: { focusKey: `result-select:${stop.id}` },
+  });
+  if (!saved) select.append(new Option("Choose route and destination…", ""));
+  select.append(new Option(any.label, ANY_ROUTE_VALUE));
   for (const choice of choices) {
-    const isCurrent = current === routeChoiceKey(choice);
-    // Marked so a press on the row is predictable without having to hover it.
-    const isDefault =
-      !isCurrent &&
-      fallback !== undefined &&
-      routeChoiceKey(choice) === routeChoiceKey(fallback);
-    const chip = button(
-      `result-route${isCurrent ? " is-current" : ""}${isDefault ? " is-default" : ""}`,
-      {
-        text: choice.label,
-        title: isCurrent
-          ? "Already the choice for this saved stop"
-          : isDefault
-            ? `${choice.title} · pressing the row saves this`
-            : choice.title,
-        ariaLabel: isCurrent
-          ? `${stop.name} already follows ${choice.name}`
-          : `Save ${choice.name} at ${stop.name}`,
-        onClick: () =>
-          void saveStop(
-            stop,
-            choice.routeId,
-            choice.directionId,
-            choice.directionHeadsign,
-          ),
-      },
+    select.append(new Option(choice.label, routeChoiceKey(choice)));
+  }
+  select.value = saved
+    ? saved.routeId
+      ? savedChoiceKey(saved)
+      : ANY_ROUTE_VALUE
+    : "";
+  select.title = saved
+    ? savedRouteDescription(saved) ?? "Following every route"
+    : "Choose a route and destination";
+  select.addEventListener("change", () => {
+    if (!select.value) return;
+    const choice =
+      select.value === ANY_ROUTE_VALUE ? any : byValue.get(select.value);
+    if (!choice) return;
+    void saveStop(
+      stop,
+      choice.routeId || undefined,
+      choice.directionId,
+      choice.directionHeadsign,
     );
-    chip.disabled = isCurrent;
-    if (!isCurrent && choice.routeId) paintRouteChip(chip, choice.routeId);
-    chips.append(chip);
-  }
+  });
 
-  // Offered where it means something different from the routes beside it. At a
-  // stop with one route the two are the same answer, and a second button saying
-  // so is a choice the rider has to think about for nothing — unless it is what
-  // the stop is already following, which has to stay visible.
-  if (routes.length !== 1 || (saved !== undefined && !saved.routeId)) {
-    const isCurrent = saved !== undefined && !saved.routeId;
-    const anyChip = button(`result-route is-any${isCurrent ? " is-current" : ""}`, {
-      text: "Any",
-      title: isCurrent
-        ? "Already following every route here"
-        : "One card for whichever bus comes next",
-      ariaLabel: isCurrent
-        ? `${stop.name} already follows every route`
-        : `Save every route at ${stop.name}`,
-      onClick: () => void saveStop(stop),
-    });
-    anyChip.disabled = isCurrent;
-    chips.append(anyChip);
-  }
-
-  // On the meta line rather than a line of their own: they are short, and the
-  // code and distance beside them leave room for four or five before anything
-  // has to wrap.
-  meta.append(chips);
+  const choiceRow = element("div", { className: "result-choice-row" }, [
+    element("span", { className: "result-choice-label", text: "Follow" }),
+    select,
+  ]);
 
   const entry = element("div", { className: "result-entry" }, [
     element("p", { className: "result-name", text: stop.name, title: stop.name }),
     meta,
+    choiceRow,
   ]);
 
-  /*
-   * The whole box takes the default route, so the common case is a press
-   * anywhere rather than aim at a small number.
-   *
-   * A plain click handler rather than a button, because the route chips are
-   * buttons and cannot be nested inside one. Nothing is keyboard-only as a
-   * result: the default route has its own chip in this row, so every action here
-   * is reachable by tab. Only wired up when it would change something, so the box
-   * does not offer a press that does nothing.
-   */
-  const rowChangesSelection = fallback
-    ? current !== routeChoiceKey(fallback)
-    : saved === undefined;
-  if (rowChangesSelection) {
-    const label = fallback
-      ? `Save ${fallback.name} at ${stop.name}`
-      : `Save ${stop.name}`;
+  // In Browse routes, the route and direction are already explicit in the tab.
+  // Keep the row shortcut there, while Search always makes the selection in the
+  // one visible control so a destination is never chosen by accident.
+  if (options.browsingRouteId && fallback) {
     entry.classList.add("is-pressable");
-    entry.title = label;
+    entry.title = `Save ${fallback.name} at ${stop.name}`;
     entry.addEventListener("click", (event) => {
-      // A chip speaks for itself.
-      if ((event.target as HTMLElement).closest("button")) return;
+      if ((event.target as HTMLElement).closest("select")) return;
       void saveStop(
         stop,
         fallback?.routeId,
