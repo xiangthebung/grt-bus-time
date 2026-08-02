@@ -950,36 +950,7 @@ ul {
   margin-top: 10px;
 }
 
-.follow-control {
-  display: block;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.follow-summary {
-  display: flex;
-  min-width: 0;
-  min-height: 30px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--text-muted);
-  background: var(--surface);
-  cursor: pointer;
-  list-style: none;
-}
-
-.follow-summary::-webkit-details-marker {
-  display: none;
-}
-
-.follow-summary::marker {
-  content: "";
-}
-
-.follow-summary-label {
+.stop-route-label {
   flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 9.5px;
@@ -988,122 +959,21 @@ ul {
   text-transform: uppercase;
 }
 
-.follow-summary-value {
+/* One compact native selector keeps the closed state short while the browser
+   supplies the full route/destination menu when the rider opens it. */
+.stop-route-select,
+.result-select {
+  display: block;
   min-width: 0;
-  overflow: hidden;
-  color: var(--text-soft);
-  font-size: 10.5px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.follow-summary-chevron {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 9px;
-  margin-left: auto;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg) translateY(-2px);
-  transition: transform 0.15s ease;
-}
-
-.follow-control[open] .follow-summary {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
-  background: var(--accent-soft);
-}
-
-.follow-control[open] .follow-summary-chevron {
-  transform: rotate(225deg) translate(-1px, -1px);
-}
-
-.follow-menu {
-  margin-top: 5px;
-  padding: 9px;
+  min-height: 30px;
+  padding: 0 8px;
   border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface-2);
-  box-shadow: var(--shadow-card);
-}
-
-.follow-menu-title {
-  margin-bottom: 7px;
-  color: var(--text-muted);
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.follow-options {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.follow-option {
-  min-width: 0;
-  min-height: 29px;
-  padding: 4px 8px;
+  border-radius: 7px;
   color: var(--text-soft);
-  border: 1px solid var(--border);
-  border-radius: 6px;
   background: var(--surface);
-  font-size: 10px;
-  font-weight: 700;
-  text-align: left;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.follow-option:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: var(--accent-soft);
-}
-
-.follow-option:disabled {
-  cursor: default;
-}
-
-.follow-option.is-active {
-  color: var(--accent-contrast);
-  border-color: transparent;
-  background: var(--accent);
-}
-
-.follow-route-group {
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 7px;
-  align-items: start;
-  padding-top: 7px;
-  border-top: 1px solid var(--border);
-}
-
-.follow-route-name {
-  display: inline-flex;
-  min-height: 24px;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 4px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text);
   font-size: 10.5px;
-  font-weight: 800;
-}
-
-.follow-route-options {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.follow-route-options .follow-option {
-  flex: 1 1 145px;
+  font-weight: 700;
+  flex: 1 1 auto;
 }
 
 .departures {
@@ -1544,20 +1414,18 @@ ul {
   font-size: 10.5px;
 }
 
-/* Serving buses stay visible in the result card. Each compact label doubles as
-   the direct follow action, so the rider never has to open a second control to
-   learn where the bus goes. */
-.result-services {
-  display: grid;
+/* Route and destination are one compact control, kept in the result card so a
+   stop with several routes does not become a row of competing buttons. */
+.result-choice-row {
+  display: flex;
   min-width: 0;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 7px;
-  align-items: start;
+  align-items: center;
+  gap: 8px;
   margin-top: 8px;
 }
 
-.result-services-label {
-  padding-top: 4px;
+.result-choice-label {
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 9.5px;
   font-weight: 800;
@@ -1565,75 +1433,8 @@ ul {
   text-transform: uppercase;
 }
 
-.result-service-list {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.result-service {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 100%;
-  min-height: 24px;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 7px 3px 4px;
-  overflow: hidden;
-  color: var(--text-soft);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.25;
-  text-align: left;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.result-service:hover {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: var(--accent-soft);
-}
-
-.result-service.is-active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
-  background: var(--accent-soft);
-}
-
-.result-service-route {
-  display: inline-flex;
-  min-width: 22px;
-  min-height: 18px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 4px;
-  border-radius: 4px;
-  color: var(--accent-contrast);
-  background: var(--accent);
-  font-size: 9.5px;
-  font-weight: 800;
-}
-
-.result-service.has-route-color .result-service-route {
-  background: var(--route-color);
-}
-
-.result-service-direction {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.result-services-empty {
-  align-self: center;
-  color: var(--text-muted);
-  font-size: 10px;
+.result-select {
+  flex: 1 1 auto;
 }
 
 .result-empty {

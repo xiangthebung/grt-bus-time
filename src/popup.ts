@@ -1042,7 +1042,6 @@ interface RouteChoice {
   directionHeadsign?: string;
   label: string;
   name: string;
-  title: string;
 }
 
 function directionChoicesAt(stopId: string, routeId: string): DirectionChoice[] {
@@ -1065,7 +1064,6 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
   return routeIds.flatMap((routeId) => {
     const route = routeFor(routeId);
     const shortName = route?.shortName ?? routeId;
-    const title = route?.longName ?? `Route ${shortName}`;
     const directions = directionChoicesAt(stopId, routeId);
     if (directions.length <= 1) {
       const direction = directions[0];
@@ -1077,7 +1075,6 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
             directionHeadsign: direction.headsign || undefined,
             label: `${shortName} · ${direction.label}`,
             name: `Route ${shortName}, ${direction.label}`,
-            title: `${title} · ${direction.label}`,
           },
         ];
       }
@@ -1086,7 +1083,6 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
           routeId,
           label: shortName,
           name: `Route ${shortName}`,
-          title,
         },
       ];
     }
@@ -1095,7 +1091,6 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
         routeId,
         label: `${shortName} · Any direction`,
         name: `Route ${shortName}, any direction`,
-        title: `${title} · any direction`,
       },
       ...directions.map((direction) => ({
         routeId,
@@ -1103,7 +1098,6 @@ function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoic
         directionHeadsign: direction.headsign || undefined,
         label: `${shortName} · ${direction.label}`,
         name: `Route ${shortName}, ${direction.label}`,
-        title: `${title} · ${direction.label}`,
       })),
     ];
   });
@@ -1146,232 +1140,69 @@ function savedRouteDescription(saved: SavedStop | undefined): string | undefined
   return route;
 }
 
+function routeChoiceForSaved(saved: SavedStop | undefined): RouteChoice | undefined {
+  if (!saved?.routeId) return undefined;
+  const label = savedRouteDescription(saved) ?? saved.routeId;
+  return {
+    routeId: saved.routeId,
+    ...(saved.directionId ? { directionId: saved.directionId } : {}),
+    ...(saved.directionHeadsign ? { directionHeadsign: saved.directionHeadsign } : {}),
+    label,
+    name: label,
+  };
+}
+
+const ANY_ROUTE_VALUE = "__any_route__";
+
+function routeSelectionChoicesAt(
+  stopId: string,
+  routeIds: readonly string[],
+  saved?: SavedStop,
+): RouteChoice[] {
+  const choices = routeChoicesAt(stopId, routeIds);
+  const savedChoice = routeChoiceForSaved(saved);
+  if (
+    savedChoice &&
+    !choices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
+  ) {
+    choices.unshift(savedChoice);
+  }
+  return choices;
+}
+
 function anyRouteChoice(): RouteChoice {
   return {
     routeId: "",
     label: "Any route",
     name: "Every route",
-    title: "Whichever bus comes next",
   };
 }
 
-interface RouteChoiceGroup {
-  routeId: string;
-  shortName: string;
-  title: string;
-  choices: RouteChoice[];
-}
-
-function routeChoiceGroupsAt(
-  stopId: string,
-  routeIds: readonly string[],
-): RouteChoiceGroup[] {
-  const choices = routeChoicesAt(stopId, routeIds);
-  return routeIds.map((routeId) => {
-    const route = routeFor(routeId);
-    const shortName = route?.shortName ?? routeId;
-    return {
-      routeId,
-      shortName,
-      title: route?.longName ?? `Route ${shortName}`,
-      choices: choices.filter((choice) => choice.routeId === routeId),
-    };
+/** Keep the same compact native selector on every saved stop, even for one route. */
+function renderStopRouteSelect(saved: SavedStop): HTMLSelectElement {
+  const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
+  const choices = routeSelectionChoicesAt(saved.stopId, routeIds, saved);
+  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
+  const select = element("select", {
+    className: "stop-route-select",
+    ariaLabel: `Route and direction followed at ${saved.stopName}`,
+    dataset: { focusKey: `route-select:${saved.id}` },
   });
-}
-
-function followOptionLabel(choice: RouteChoice, group: RouteChoiceGroup): string {
-  if (choice.directionId) {
-    return directionLabel(choice.directionId, choice.directionHeadsign) ?? choice.label;
+  select.append(new Option(anyRouteChoice().label, ANY_ROUTE_VALUE));
+  for (const choice of choices) {
+    select.append(new Option(choice.label, routeChoiceKey(choice)));
   }
-  return group.choices.some((option) => option.directionId)
-    ? "Any direction"
-    : "This route";
-}
-
-function servingChoicesFor(
-  group: RouteChoiceGroup,
-  saved: SavedStop | undefined,
-): RouteChoice[] {
-  const directions = group.choices.filter((choice) => choice.directionId);
-  if (directions.length === 0) return group.choices;
-
-  // Keep an already-selected "any direction" choice visible without adding
-  // it to every card. The destinations are the useful at-a-glance information;
-  // the broader choice only matters when it is the current selection.
-  const anyDirection = group.choices.find((choice) => !choice.directionId);
-  if (anyDirection && saved?.routeId === group.routeId && !saved.directionId) {
-    return [anyDirection, ...directions];
-  }
-  return directions;
-}
-
-function renderServingRoutes(
-  stopId: string,
-  stopName: string,
-  routeIds: readonly string[],
-  saved: SavedStop | undefined,
-  onChoose: (choice: RouteChoice) => void,
-): HTMLElement {
-  const services = element("div", { className: "result-services" });
-  services.append(
-    element("span", { className: "result-services-label", text: "Buses" }),
-  );
-  const list = element("div", { className: "result-service-list" });
-
-  for (const group of routeChoiceGroupsAt(stopId, routeIds)) {
-    for (const choice of servingChoicesFor(group, saved)) {
-      const active = savedChoiceKey(saved) === routeChoiceKey(choice);
-      const option = button(
-        `result-service${active ? " is-active" : ""}`,
-        {
-          ariaLabel: active
-            ? `${choice.name} at ${stopName}, selected`
-            : `Follow ${choice.name} at ${stopName}`,
-          title: active ? `Following ${choice.name}` : `Follow ${choice.name}`,
-          dataset: {
-            focusKey: `result-service:${stopId}:${routeChoiceKey(choice)}`,
-          },
-          onClick: () => onChoose(choice),
-        },
-        [
-          element("span", { className: "result-service-route", text: group.shortName }),
-          choice.directionId
-            ? element("span", {
-                className: "result-service-direction",
-                text: followOptionLabel(choice, group),
-              })
-            : undefined,
-        ],
-      );
-      const route = routeFor(group.routeId);
-      const color = route ? routeBadgeColor(route) : undefined;
-      if (color) {
-        option.classList.add("has-route-color");
-        option.style.setProperty("--route-color", color);
-      }
-      option.setAttribute("aria-pressed", String(active));
-      list.append(option);
-    }
-  }
-
-  if (list.childElementCount === 0) {
-    list.append(
-      element("span", { className: "result-services-empty", text: "No bus data" }),
+  select.value = saved.routeId ? savedChoiceKey(saved) : ANY_ROUTE_VALUE;
+  select.addEventListener("change", () => {
+    const choice = byValue.get(select.value);
+    void changeStopRoute(
+      saved,
+      choice?.routeId ?? "",
+      choice?.directionId,
+      choice?.directionHeadsign,
     );
-  }
-  services.append(list);
-  return services;
-}
-
-function followSummary(saved: SavedStop | undefined): string {
-  if (!saved) return "Choose route and destination";
-  return savedRouteDescription(saved) ?? "Any route";
-}
-
-function followOptionButton(
-  details: HTMLDetailsElement,
-  choice: RouteChoice,
-  label: string,
-  active: boolean,
-  onChoose: (choice: RouteChoice) => void,
-): HTMLButtonElement {
-  const option = button(`follow-option${active ? " is-active" : ""}`, {
-    text: label,
-    ariaLabel: active ? `${choice.name}, selected` : choice.name,
-    title: choice.title,
-    onClick: () => {
-      details.open = false;
-      onChoose(choice);
-    },
   });
-  option.setAttribute("aria-pressed", String(active));
-  option.disabled = active;
-  return option;
-}
-
-function renderFollowControl(
-  stopId: string,
-  stopName: string,
-  routeIds: readonly string[],
-  saved: SavedStop | undefined,
-  onChoose: (choice: RouteChoice) => void,
-  always = false,
-): HTMLDetailsElement | undefined {
-  const groups = routeChoiceGroupsAt(stopId, routeIds);
-  const hasDirectionChoices = groups.some((group) => group.choices.length > 1);
-  if (!always && groups.length < 2 && !hasDirectionChoices) return undefined;
-
-  const details = element("details", { className: "follow-control" });
-  const focusKey = saved
-    ? `follow:${saved.id}`
-    : `follow-result:${stopId}`;
-  details.dataset.focusKey = focusKey;
-  const summary = element(
-    "summary",
-    {
-      className: "follow-summary",
-      ariaLabel: `Route and direction followed at ${stopName}`,
-      dataset: { focusKey },
-    },
-    [
-      element("span", { className: "follow-summary-label", text: "Follow" }),
-      element("span", { className: "follow-summary-value", text: followSummary(saved) }),
-      element("span", { className: "follow-summary-chevron", ariaLabel: "" }),
-    ],
-  );
-  details.append(summary);
-
-  const menu = element("div", { className: "follow-menu" });
-  menu.append(
-    element("p", {
-      className: "follow-menu-title",
-      text: "Choose a route and destination",
-    }),
-  );
-  const options = element("div", { className: "follow-options" });
-  const any = anyRouteChoice();
-  options.append(
-    followOptionButton(
-      details,
-      any,
-      any.label,
-      saved !== undefined && !saved.routeId,
-      onChoose,
-    ),
-  );
-
-  for (const group of groups) {
-    const groupElement = element("div", { className: "follow-route-group" });
-    const routeName = element("span", {
-      className: "follow-route-name",
-      text: group.shortName,
-    });
-    const routeColor = routeFor(group.routeId);
-    const color = routeColor ? routeBadgeColor(routeColor) : undefined;
-    if (color) {
-      routeName.style.backgroundColor = color;
-      routeName.style.color = "#fff";
-      routeName.style.borderColor = "transparent";
-    }
-    groupElement.append(routeName);
-    const routeOptions = element("div", { className: "follow-route-options" });
-    for (const choice of group.choices) {
-      routeOptions.append(
-        followOptionButton(
-          details,
-          choice,
-          followOptionLabel(choice, group),
-          savedChoiceKey(saved) === routeChoiceKey(choice),
-          onChoose,
-        ),
-      );
-    }
-    groupElement.append(routeOptions);
-    options.append(groupElement);
-  }
-  menu.append(options);
-  details.append(menu);
-  return details;
+  return select;
 }
 
 function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
@@ -1413,32 +1244,7 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
   const meta = element("div", { className: "stop-meta" }, [
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
-  const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
-  const followControl = renderFollowControl(
-    saved.stopId,
-    saved.stopName,
-    routeIds,
-    saved,
-    (choice) =>
-      void changeStopRoute(
-        saved,
-        choice.routeId,
-        choice.directionId,
-        choice.directionHeadsign,
-      ),
-  );
-  const watchedRoute = savedRouteDescription(saved);
-  // Only when there is no selector to say it: with one present, the selected
-  // value is already the answer and a second copy on the same line is noise.
-  if (watchedRoute && !followControl) {
-    meta.append(
-      element("span", {
-        className: "meta-route",
-        text: watchedRoute,
-        title: `This card only shows departures for ${watchedRoute}`,
-      }),
-    );
-  }
+  const routeSelect = renderStopRouteSelect(saved);
   if (isNearest) {
     meta.append(element("span", { className: "stop-tag", text: "Closest" }));
   }
@@ -1462,13 +1268,12 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       renderStopTools(saved),
     ]),
   );
-  if (followControl) {
-    card.append(
-      element("div", { className: "stop-route-row" }, [
-        followControl,
-      ]),
-    );
-  }
+  card.append(
+    element("div", { className: "stop-route-row" }, [
+      element("span", { className: "stop-route-label", text: "Follow" }),
+      routeSelect,
+    ]),
+  );
 
   const bus = nextBus(board.departures, state.settings.departuresPerStop);
   if (bus) {
@@ -1646,11 +1451,13 @@ function defaultRouteChoice(
   return choices[0];
 }
 
-/** A stop in the picker with its serving buses visible at a glance. */
+/** A stop in the picker with one compact route/destination selector. */
 function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   const routes = routesAt(stop, options.routeIds);
   const saved = savedStopFor(stop.id);
-  const choices = routeChoicesAt(stop.id, routes);
+  const choices = routeSelectionChoicesAt(stop.id, routes, saved);
+  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
+  const any = anyRouteChoice();
   const fallback = defaultRouteChoice(
     choices,
     options.browsingRouteId,
@@ -1664,32 +1471,53 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
       : undefined,
   ]);
 
+  const select = element("select", {
+    className: "result-select",
+    ariaLabel: `Route and direction to follow at ${stop.name}`,
+    dataset: { focusKey: `result-select:${stop.id}` },
+  });
+  if (!saved) select.append(new Option("Choose route and destination…", ""));
+  select.append(new Option(any.label, ANY_ROUTE_VALUE));
+  for (const choice of choices) {
+    select.append(new Option(choice.label, routeChoiceKey(choice)));
+  }
+  select.value = saved
+    ? saved.routeId
+      ? savedChoiceKey(saved)
+      : ANY_ROUTE_VALUE
+    : "";
+  select.addEventListener("change", () => {
+    if (!select.value) return;
+    const choice =
+      select.value === ANY_ROUTE_VALUE ? any : byValue.get(select.value);
+    if (!choice) return;
+    void saveStop(
+      stop,
+      choice.routeId || undefined,
+      choice.directionId,
+      choice.directionHeadsign,
+    );
+  });
+
+  const choiceRow = element("div", { className: "result-choice-row" }, [
+    element("span", { className: "result-choice-label", text: "Follow" }),
+    select,
+  ]);
+
   const entry = element("div", { className: "result-entry" }, [
     element("p", { className: "result-name", text: stop.name, title: stop.name }),
     meta,
-    renderServingRoutes(
-      stop.id,
-      stop.name,
-      routes,
-      saved,
-      (choice) =>
-        void saveStop(
-          stop,
-          choice.routeId || undefined,
-          choice.directionId,
-          choice.directionHeadsign,
-        ),
-    ),
+    choiceRow,
   ]);
 
   // In Browse routes, the route and direction are already explicit in the tab.
-  // Keep the row shortcut there, while the visible bus labels make Search
-  // selection explicit instead of hiding the destination in a menu.
+  // Keep the row shortcut there, while Search always makes the selection in the
+  // one visible control so a destination is never chosen by accident.
   if (options.browsingRouteId && fallback) {
     entry.classList.add("is-pressable");
     entry.title = `Save ${fallback.name} at ${stop.name}`;
     entry.addEventListener("click", (event) => {
-      if ((event.target as HTMLElement).closest("button")) return;
+      if ((event.target as HTMLElement).closest("select")) return;
       void saveStop(
         stop,
         fallback?.routeId,
@@ -1989,15 +1817,11 @@ function restoreFocus(focusKey: string | undefined): void {
 /**
  * True while a native dropdown is open somewhere in the popup.
  *
- * A `<select>` holds focus while its menu is up, and a `<details>` disclosure
- * remains open while its options are being read. Rebuilding the markup around
- * either one would interrupt that interaction.
+ * A `<select>` holds focus while its menu is up. Rebuilding the markup around
+ * it — or even reassigning its value — closes that menu.
  */
 function menuIsOpen(): boolean {
-  return (
-    document.activeElement instanceof HTMLSelectElement ||
-    Boolean(document.querySelector("details[open]"))
-  );
+  return document.activeElement instanceof HTMLSelectElement;
 }
 
 /**
