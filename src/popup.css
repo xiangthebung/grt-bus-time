@@ -1544,11 +1544,96 @@ ul {
   font-size: 10.5px;
 }
 
-/* Route and destination are one disclosure, kept inside the result card so a
-   stop with several routes does not become a row of competing controls. */
-.result-choice-row {
+/* Serving buses stay visible in the result card. Each compact label doubles as
+   the direct follow action, so the rider never has to open a second control to
+   learn where the bus goes. */
+.result-services {
+  display: grid;
   min-width: 0;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
   margin-top: 8px;
+}
+
+.result-services-label {
+  padding-top: 4px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.result-service-list {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.result-service {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px 3px 4px;
+  overflow: hidden;
+  color: var(--text-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: left;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.result-service:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+}
+
+.result-service.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--accent-soft);
+}
+
+.result-service-route {
+  display: inline-flex;
+  min-width: 22px;
+  min-height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-size: 9.5px;
+  font-weight: 800;
+}
+
+.result-service.has-route-color .result-service-route {
+  background: var(--route-color);
+}
+
+.result-service-direction {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-services-empty {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
 .result-empty {

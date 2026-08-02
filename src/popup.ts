@@ -1188,6 +1188,81 @@ function followOptionLabel(choice: RouteChoice, group: RouteChoiceGroup): string
     : "This route";
 }
 
+function servingChoicesFor(
+  group: RouteChoiceGroup,
+  saved: SavedStop | undefined,
+): RouteChoice[] {
+  const directions = group.choices.filter((choice) => choice.directionId);
+  if (directions.length === 0) return group.choices;
+
+  // Keep an already-selected "any direction" choice visible without adding
+  // it to every card. The destinations are the useful at-a-glance information;
+  // the broader choice only matters when it is the current selection.
+  const anyDirection = group.choices.find((choice) => !choice.directionId);
+  if (anyDirection && saved?.routeId === group.routeId && !saved.directionId) {
+    return [anyDirection, ...directions];
+  }
+  return directions;
+}
+
+function renderServingRoutes(
+  stopId: string,
+  stopName: string,
+  routeIds: readonly string[],
+  saved: SavedStop | undefined,
+  onChoose: (choice: RouteChoice) => void,
+): HTMLElement {
+  const services = element("div", { className: "result-services" });
+  services.append(
+    element("span", { className: "result-services-label", text: "Buses" }),
+  );
+  const list = element("div", { className: "result-service-list" });
+
+  for (const group of routeChoiceGroupsAt(stopId, routeIds)) {
+    for (const choice of servingChoicesFor(group, saved)) {
+      const active = savedChoiceKey(saved) === routeChoiceKey(choice);
+      const option = button(
+        `result-service${active ? " is-active" : ""}`,
+        {
+          ariaLabel: active
+            ? `${choice.name} at ${stopName}, selected`
+            : `Follow ${choice.name} at ${stopName}`,
+          title: active ? `Following ${choice.name}` : `Follow ${choice.name}`,
+          dataset: {
+            focusKey: `result-service:${stopId}:${routeChoiceKey(choice)}`,
+          },
+          onClick: () => onChoose(choice),
+        },
+        [
+          element("span", { className: "result-service-route", text: group.shortName }),
+          choice.directionId
+            ? element("span", {
+                className: "result-service-direction",
+                text: followOptionLabel(choice, group),
+              })
+            : undefined,
+        ],
+      );
+      const route = routeFor(group.routeId);
+      const color = route ? routeBadgeColor(route) : undefined;
+      if (color) {
+        option.classList.add("has-route-color");
+        option.style.setProperty("--route-color", color);
+      }
+      option.setAttribute("aria-pressed", String(active));
+      list.append(option);
+    }
+  }
+
+  if (list.childElementCount === 0) {
+    list.append(
+      element("span", { className: "result-services-empty", text: "No bus data" }),
+    );
+  }
+  services.append(list);
+  return services;
+}
+
 function followSummary(saved: SavedStop | undefined): string {
   if (!saved) return "Choose route and destination";
   return savedRouteDescription(saved) ?? "Any route";
@@ -1571,24 +1646,10 @@ function defaultRouteChoice(
   return choices[0];
 }
 
-/** A stop in the picker with one integrated route/destination disclosure. */
+/** A stop in the picker with its serving buses visible at a glance. */
 function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   const routes = routesAt(stop, options.routeIds);
   const saved = savedStopFor(stop.id);
-  const followControl = renderFollowControl(
-    stop.id,
-    stop.name,
-    routes,
-    saved,
-    (choice) =>
-      void saveStop(
-        stop,
-        choice.routeId || undefined,
-        choice.directionId,
-        choice.directionHeadsign,
-      ),
-    true,
-  );
   const choices = routeChoicesAt(stop.id, routes);
   const fallback = defaultRouteChoice(
     choices,
@@ -1606,17 +1667,29 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   const entry = element("div", { className: "result-entry" }, [
     element("p", { className: "result-name", text: stop.name, title: stop.name }),
     meta,
-    element("div", { className: "result-choice-row" }, [followControl]),
+    renderServingRoutes(
+      stop.id,
+      stop.name,
+      routes,
+      saved,
+      (choice) =>
+        void saveStop(
+          stop,
+          choice.routeId || undefined,
+          choice.directionId,
+          choice.directionHeadsign,
+        ),
+    ),
   ]);
 
   // In Browse routes, the route and direction are already explicit in the tab.
-  // Keep the row shortcut there, while Search always makes the selection in the
-  // disclosure so a destination is never chosen by accident.
+  // Keep the row shortcut there, while the visible bus labels make Search
+  // selection explicit instead of hiding the destination in a menu.
   if (options.browsingRouteId && fallback) {
     entry.classList.add("is-pressable");
     entry.title = `Save ${fallback.name} at ${stop.name}`;
     entry.addEventListener("click", (event) => {
-      if ((event.target as HTMLElement).closest("details")) return;
+      if ((event.target as HTMLElement).closest("button")) return;
       void saveStop(
         stop,
         fallback?.routeId,
