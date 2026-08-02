@@ -221,6 +221,23 @@ export async function restoreSavedStop(stop: SavedStop): Promise<SavedStop[]> {
   return persist(restored);
 }
 
+/** Persists a complete saved-stop order after validating that no stop was lost. */
+export async function reorderSavedStops(ids: readonly string[]): Promise<SavedStop[]> {
+  const stops = await getSavedStops();
+  const idsSet = new Set(ids);
+  if (
+    ids.length !== stops.length ||
+    idsSet.size !== ids.length ||
+    stops.some((stop) => !idsSet.has(stop.id))
+  ) {
+    return stops;
+  }
+  const byId = new Map(stops.map((stop) => [stop.id, stop]));
+  if (byId.size !== stops.length || ids.some((id) => !byId.has(id))) return stops;
+  const reordered = ids.map((id) => byId.get(id) as SavedStop);
+  return persist(reordered);
+}
+
 export async function updateSavedStop(
   id: string,
   changes: Partial<Omit<SavedStop, "id">>,

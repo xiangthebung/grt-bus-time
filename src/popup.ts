@@ -14,6 +14,7 @@ import {
   formatDelay,
   formatDistance,
   formatFreshness,
+  formatOverdueDelay,
   formatWalkTime,
   formatWeekday,
   minutesUntil,
@@ -49,6 +50,7 @@ import {
   getSavedStops,
   getSettings,
   removeSavedStop,
+  reorderSavedStops,
   restoreSavedStop,
   saveSettings,
   setStopAlerts,
@@ -77,6 +79,11 @@ const SEARCH_RESULT_LIMIT = 25;
 const TOAST_MS = 8_000;
 const FLASH_MS = 3_000;
 const FLASH_ERROR_MS = 5_000;
+const CARD_ANIMATION_MS = 350;
+
+/** Cards whose entry animation has finished, so re-renders don't replay it. */
+const animatedCardIds = new Set<string>();
+const cardAnimationTimers = new Map<string, number>();
 
 const el = {
   root: document.documentElement,
@@ -565,16 +572,29 @@ interface TimeLabels {
 /**
  * Within the hour a countdown is what riders want; beyond that the clock time
  * is far more useful, so the two swap places.
+ *
+ * When a live bus is past its predicted time, the countdown slot shows the
+ * delay instead of "Due" — that is the number the rider's eyes are on, and
+ * "Due" says nothing about how late the bus actually is.
  */
-function departureLabels(timeMs: number, now = Date.now()): TimeLabels {
+function departureLabels(timeMs: number, delaySec?: number, now = Date.now()): TimeLabels {
   const minutes = minutesUntil(timeMs, now);
   const dayPrefix =
     serviceDateKey(timeMs) === serviceDateKey(now) ? "" : `${formatWeekday(timeMs)} `;
   if (minutes < 60) {
+    const overdue =
+      delaySec === undefined ? undefined : formatOverdueDelay(timeMs, delaySec, now);
+    if (overdue) {
+      return {
+        primary: overdue,
+        secondary: `${dayPrefix}${formatClock(timeMs)}`,
+        className: "countdown is-soon",
+      };
+    }
     return {
       primary: formatCountdown(timeMs, now),
       secondary: `${dayPrefix}${formatClock(timeMs)}`,
-      className: `countdown${minutes <= 2 ? " is-soon" : minutes <= 7 ? " is-near" : ""}`,
+      className: `countdown${minutes <= 2 ? " is-soon" : minutes <= 5 ? " is-near" : ""}`,
     };
   }
   return {
@@ -643,43 +663,223 @@ function separator(): HTMLElement {
   return element("span", { className: "note-sep", text: "·" });
 }
 
+/* ------------------------------------------------------------------ *
+ * Drag-and-drop reorder
+ * ------------------------------------------------------------------ */
+
+let dragStopId: string | undefined;
+
+function autoOrderActive(): boolean {
+  return (
+    proUnlocked() &&
+    state.settings.nearestFirst &&
+    state.nearestSavedId !== undefined &&
+    state.savedStops.some((stop) => stop.id === state.nearestSavedId)
+  );
+}
+
+function canReorderStop(saved: SavedStop): boolean {
+  return !(autoOrderActive() && saved.id === state.nearestSavedId);
+}
+
+/** Keeps the closest stop pinned while reordering the other visible cards. */
+function canonicalOrderForDisplay(
+  displayed: readonly SavedStop[],
+  pinnedNearestId?: string,
+): SavedStop[] {
+  if (!pinnedNearestId || !state.savedStops.some((stop) => stop.id === pinnedNearestId)) {
+    return [...displayed];
+  }
+  const remaining = displayed.filter((stop) => stop.id !== pinnedNearestId);
+  const canonical: SavedStop[] = [];
+  let nextRemaining = 0;
+  for (const stop of state.savedStops) {
+    if (stop.id === pinnedNearestId) {
+      canonical.push(stop);
+      continue;
+    }
+    const replacement = remaining[nextRemaining++];
+    if (replacement) canonical.push(replacement);
+  }
+  return canonical.length === state.savedStops.length ? canonical : [...displayed];
+}
+
+async function persistDisplayOrder(
+  displayed: readonly SavedStop[],
+  pinnedNearestId?: string,
+): Promise<void> {
+  const canonical = canonicalOrderForDisplay(displayed, pinnedNearestId);
+  const stops = await reorderSavedStops(canonical.map((stop) => stop.id));
+  await afterStopsChanged(stops);
+  flashStatus("Stop order updated");
+}
+
+function onGripKeyDown(event: KeyboardEvent, saved: SavedStop): void {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  if (!canReorderStop(saved)) {
+    announce("The closest stop is ordered automatically.");
+    return;
+  }
+  const ordered = displayOrder();
+  const fromIndex = ordered.findIndex((stop) => stop.id === saved.id);
+  if (fromIndex === -1) return;
+  const direction = event.key === "ArrowUp" ? -1 : 1;
+  const pinnedNearestId = autoOrderActive() ? state.nearestSavedId : undefined;
+  let toIndex = Math.max(0, Math.min(ordered.length - 1, fromIndex + direction));
+  if (pinnedNearestId) toIndex = Math.max(1, toIndex);
+  if (toIndex === fromIndex) return;
+  const next = [...ordered];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  void persistDisplayOrder(next, pinnedNearestId).catch((error) => {
+    flashStatus(errorMessage(error, "Could not reorder stops."), "error");
+  });
+}
+
+function onDragStart(event: DragEvent, saved: SavedStop): void {
+  if (!canReorderStop(saved) || !event.dataTransfer) return;
+  dragStopId = saved.id;
+  const card = (event.currentTarget as HTMLElement).closest(".stop-card");
+  if (card) card.classList.add("is-dragging");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.dropEffect = "move";
+  event.dataTransfer.setData("text/plain", saved.id);
+}
+
+function onDragEnd(_event: DragEvent): void {
+  dragStopId = undefined;
+  for (const card of queryAll(".stop-card")) {
+    card.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+  }
+}
+
+function onDragOver(event: DragEvent, saved: SavedStop): void {
+  if (!dragStopId || dragStopId === saved.id || !canReorderStop(saved)) return;
+  event.preventDefault();
+  const card = (event.currentTarget as HTMLElement).closest(".stop-card");
+  if (!card) return;
+  for (const other of queryAll(".stop-card")) {
+    if (other !== card) other.classList.remove("is-drop-before", "is-drop-after");
+  }
+  const rect = card.getBoundingClientRect();
+  const midY = rect.top + rect.height / 2;
+  card.classList.remove("is-drop-before", "is-drop-after");
+  card.classList.add(event.clientY < midY ? "is-drop-before" : "is-drop-after");
+}
+
+function onDragLeave(event: DragEvent): void {
+  const card = (event.currentTarget as HTMLElement).closest(".stop-card");
+  const related = event.relatedTarget;
+  if (card && related instanceof Node && card.contains(related)) return;
+  if (card) card.classList.remove("is-drop-before", "is-drop-after");
+}
+
+async function onDrop(event: DragEvent, targetSaved: SavedStop): Promise<void> {
+  event.preventDefault();
+  const sourceId = dragStopId;
+  if (!sourceId || sourceId === targetSaved.id || !canReorderStop(targetSaved)) {
+    onDragEnd(event);
+    return;
+  }
+  const card = (event.currentTarget as HTMLElement).closest(".stop-card");
+  if (!card) {
+    onDragEnd(event);
+    return;
+  }
+  const rect = card.getBoundingClientRect();
+  const midY = rect.top + rect.height / 2;
+  const insertBefore = event.clientY < midY;
+
+  const ordered = displayOrder();
+  const fromIndex = ordered.findIndex((stop) => stop.id === sourceId);
+  if (fromIndex === -1) {
+    onDragEnd(event);
+    return;
+  }
+  let toIndex = ordered.findIndex((stop) => stop.id === targetSaved.id);
+  if (toIndex === -1) {
+    onDragEnd(event);
+    return;
+  }
+  if (!insertBefore) toIndex += 1;
+  if (fromIndex < toIndex) toIndex -= 1;
+  const pinnedNearestId = autoOrderActive() ? state.nearestSavedId : undefined;
+  if (sourceId === pinnedNearestId) {
+    onDragEnd(event);
+    return;
+  }
+  if (pinnedNearestId) toIndex = Math.max(1, toIndex);
+  toIndex = Math.max(0, Math.min(ordered.length - 1, toIndex));
+  if (fromIndex === toIndex) {
+    onDragEnd(event);
+    return;
+  }
+  const next = [...ordered];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+
+  onDragEnd(event);
+  try {
+    await persistDisplayOrder(next, pinnedNearestId);
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not reorder stops."), "error");
+  }
+}
+
 /** Interleaves note fragments with a middot so each fact reads on its own. */
 function withSeparators(parts: readonly Node[]): Node[] {
   return parts.flatMap((part, position) => (position === 0 ? [part] : [separator(), part]));
 }
 
+function departureNoteNodes(
+  departure: Pick<Departure, "isLive" | "delaySec" | "stopsAway">,
+  labels: TimeLabels,
+): Node[] {
+  if (!departure.isLive) return [];
+  const notes: Node[] = [element("span", { className: "note-live", text: "Live" })];
+  const delay = formatDelay(departure.delaySec);
+  if (delay && labels.primary !== delay) {
+    notes.push(
+      element("span", {
+        className: departure.delaySec > 0 ? "note-late" : "note-early",
+        text: delay,
+      }),
+    );
+  }
+  if (departure.stopsAway !== undefined) {
+    notes.push(
+      element("span", {
+        text:
+          departure.stopsAway === 0
+            ? "at your stop"
+            : departure.stopsAway === 1
+              ? "1 stop away"
+              : `${departure.stopsAway} stops away`,
+      }),
+    );
+  }
+  return notes;
+}
+
 function renderDeparture(group: NextBus): HTMLElement {
   const departure = group.head;
-  const notes: Node[] = [];
-  if (departure.isLive) {
-    notes.push(element("span", { className: "note-live", text: "Live" }));
-    const delay = formatDelay(departure.delaySec);
-    if (delay) {
-      notes.push(
-        element("span", {
-          className: departure.delaySec > 0 ? "note-late" : "note-early",
-          text: delay,
-        }),
-      );
-    }
-    if (departure.stopsAway !== undefined) {
-      notes.push(
-        element("span", {
-          text:
-            departure.stopsAway === 0
-              ? "at your stop"
-              : departure.stopsAway === 1
-                ? "1 stop away"
-                : `${departure.stopsAway} stops away`,
-        }),
-      );
-    }
-  }
+  const now = Date.now();
+  const labels = departureLabels(
+    departure.timeMs,
+    departure.isLive ? departure.delaySec : undefined,
+    now,
+  );
 
-  const labels = departureLabels(departure.timeMs);
   return element(
     "li",
-    { className: "departure", dataset: { time: String(departure.timeMs) } },
+    {
+      className: "departure",
+      dataset: {
+        time: String(departure.timeMs),
+        delay: departure.isLive ? String(departure.delaySec) : "",
+      },
+    },
     [
       routeBadge({
         shortName: departure.routeShortName,
@@ -692,7 +892,19 @@ function renderDeparture(group: NextBus): HTMLElement {
         }),
         // Always present, even when empty, so a row keeps its height when live
         // information arrives or drops away.
-        element("p", { className: "departure-note" }, withSeparators(notes)),
+        element(
+          "p",
+          {
+            className: "departure-note",
+            dataset: {
+              live: String(departure.isLive),
+              delay: String(departure.delaySec),
+              stopsAway:
+                departure.stopsAway === undefined ? "" : String(departure.stopsAway),
+            },
+          },
+          withSeparators(departureNoteNodes(departure, labels)),
+        ),
         renderFollowUps(group.rest),
       ]),
       element("div", { className: "departure-time" }, [
@@ -727,6 +939,25 @@ function describeAlerts(
 
 function renderStopTools(saved: SavedStop): HTMLElement {
   const tools = element("div", { className: "stop-tools" });
+  const canReorder = canReorderStop(saved);
+  const grip = button(
+    "tool-button stop-grip",
+    {
+      ariaLabel: canReorder
+        ? `Reorder ${saved.stopName}; use the arrow keys to move`
+        : `${saved.stopName} is ordered automatically as the closest stop`,
+      title: canReorder
+        ? "Drag to reorder, or use the arrow keys"
+        : "Closest stop is ordered automatically",
+      dataset: { focusKey: `grip:${saved.id}` },
+    },
+    [icon(ICONS.grip, true)],
+  );
+  grip.disabled = !canReorder;
+  grip.draggable = canReorder;
+  if (canReorder) grip.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+  grip.addEventListener("keydown", (event) => onGripKeyDown(event, saved));
+  tools.append(grip);
 
   if (proBuild) {
     const enabled = Boolean(saved.alertsEnabled) && proUnlocked();
@@ -800,11 +1031,10 @@ function savedRouteLabel(saved: SavedStop): string | undefined {
  * Which route the card follows, as buttons rather than a menu.
  *
  * A menu hid the answer behind a press and hid the alternatives behind another
- * one, for a choice that is at most a handful of short numbers. They ride along
- * on the meta line beside the stop code instead of taking a row of their own:
- * a row cost every card thirty-odd pixels for four small numbers, on a panel
- * where a saved stop should fit on screen with the others. Only drawn when there
- * is a choice to make — a stop with one route has none.
+ * one, for a choice that is at most a handful of short numbers. They get their
+ * own compact row below the stop metadata so the stop name and distance never
+ * compete with route choices for the same horizontal pixels. Only drawn when
+ * there is a choice to make — a stop with one route has none.
  *
  * It also gives every stop saved before routes existed a way in. Those all
  * follow every route, and without this the only route choice would be on stops
@@ -879,17 +1109,29 @@ function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
   return "No departures in the next day. This stop may be out of service.";
 }
 
+function cardShouldAnimate(id: string): boolean {
+  if (animatedCardIds.has(id)) return false;
+  if (!cardAnimationTimers.has(id)) {
+    const timer = window.setTimeout(() => {
+      animatedCardIds.add(id);
+      cardAnimationTimers.delete(id);
+    }, CARD_ANIMATION_MS);
+    cardAnimationTimers.set(id, timer);
+  }
+  return true;
+}
+
 function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
   const isNearest = proUnlocked() && saved.id === state.nearestSavedId;
+  const isNew = cardShouldAnimate(saved.id);
   const card = element("article", {
-    className: `stop-card${isNearest ? " is-nearest" : ""}`,
+    className: `stop-card${isNearest ? " is-nearest" : ""}${isNew ? " is-new" : ""}`,
   });
   card.setAttribute("role", "listitem");
 
-  // Most important first, and anything that will not fit is clipped rather than
-  // wrapped, so the card does not change height as live data comes and goes. The
-  // route buttons at the end are the exception: they wrap, because a button that
-  // has been clipped off the edge is an option the rider cannot take.
+  // Keep the stop name and metadata readable before the controls. Metadata may
+  // wrap when a narrow panel cannot fit the distance; route choices are placed
+  // in their own row below this block so neither set of facts is clipped.
   const meta = element("div", { className: "stop-meta" }, [
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
@@ -919,8 +1161,6 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       }),
     );
   }
-  // Last, so the facts about the stop read first and the controls trail them.
-  if (routeChips) meta.append(routeChips);
 
   card.append(
     element("div", { className: "stop-head" }, [
@@ -931,6 +1171,14 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       renderStopTools(saved),
     ]),
   );
+  if (routeChips) {
+    card.append(
+      element("div", { className: "stop-route-row" }, [
+        element("span", { className: "stop-route-label", text: "Follow" }),
+        routeChips,
+      ]),
+    );
+  }
 
   const bus = nextBus(board.departures, state.settings.departuresPerStop);
   if (bus) {
@@ -949,6 +1197,16 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
     );
   }
 
+  // Drag-and-drop reorder wiring
+  const grip = card.querySelector<HTMLElement>(".stop-grip");
+  if (grip && !grip.hasAttribute("disabled")) {
+    grip.addEventListener("dragstart", (event) => onDragStart(event as DragEvent, saved));
+    grip.addEventListener("dragend", (event) => onDragEnd(event as DragEvent));
+  }
+  card.addEventListener("dragover", (event) => onDragOver(event as DragEvent, saved));
+  card.addEventListener("dragleave", (event) => onDragLeave(event as DragEvent));
+  card.addEventListener("drop", (event) => onDrop(event as DragEvent, saved));
+
   return card;
 }
 
@@ -958,7 +1216,7 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
  */
 function displayOrder(): SavedStop[] {
   const stops = [...state.savedStops];
-  if (!proUnlocked() || !state.settings.nearestFirst || !state.nearestSavedId) {
+  if (!autoOrderActive()) {
     return stops;
   }
   const position = stops.findIndex((stop) => stop.id === state.nearestSavedId);
@@ -994,13 +1252,38 @@ function tickCountdowns(): void {
   for (const node of queryAll<HTMLElement>(".departure[data-time]")) {
     const timeMs = Number(node.dataset.time);
     if (!Number.isFinite(timeMs)) continue;
+    const delaySec = Number(node.dataset.delay);
     const countdown = node.querySelector<HTMLElement>(".countdown");
     const clock = node.querySelector<HTMLElement>(".clock");
     if (!countdown || !clock) continue;
-    const labels = departureLabels(timeMs);
+    const labels = departureLabels(
+      timeMs,
+      Number.isFinite(delaySec) ? delaySec : undefined,
+    );
     countdown.textContent = labels.primary;
     countdown.className = labels.className;
     clock.textContent = labels.secondary;
+
+    const note = node.querySelector<HTMLElement>(".departure-note");
+    if (note?.dataset.live === "true") {
+      const stopsAwayValue = note.dataset.stopsAway;
+      const stopsAwayNumber = Number(stopsAwayValue);
+      const stopsAway =
+        stopsAwayValue && Number.isFinite(stopsAwayNumber) ? stopsAwayNumber : undefined;
+      const noteDelay = Number(note.dataset.delay);
+      note.replaceChildren(
+        ...withSeparators(
+          departureNoteNodes(
+            {
+              isLive: true,
+              delaySec: Number.isFinite(noteDelay) ? noteDelay : 0,
+              ...(stopsAway !== undefined ? { stopsAway } : {}),
+            },
+            labels,
+          ),
+        ),
+      );
+    }
   }
   for (const node of queryAll<HTMLElement>(".then-time[data-time]")) {
     const timeMs = Number(node.dataset.time);

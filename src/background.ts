@@ -13,7 +13,12 @@
 
 import { currentLocation } from "./backgroundLocation";
 import { getDepartureBoard, prepareRealtime, type RealtimeLookup } from "./departures";
-import { formatBadge, formatCountdown, minutesUntil } from "./format";
+import {
+  formatBadge,
+  formatCountdown,
+  formatOverdueDelay,
+  minutesUntil,
+} from "./format";
 import {
   chooseNearestSavedStop,
   getNearestStopChoice,
@@ -260,7 +265,7 @@ async function clearBadge(title = "GRT Next Bus"): Promise<void> {
 
 function badgeColor(minutes: number): string {
   if (minutes <= 2) return "#c2352f";
-  if (minutes <= 7) return "#c26a15";
+  if (minutes <= 5) return "#c26a15";
   return "#1f7a52";
 }
 
@@ -360,13 +365,15 @@ async function updateBadge(lookup: RealtimeLookup): Promise<number | undefined> 
   }
 
   const minutes = minutesUntil(next.timeMs, now);
+  const countdown =
+    (next.isLive ? formatOverdueDelay(next.timeMs, next.delaySec, now) : undefined) ??
+    formatCountdown(next.timeMs, now);
   await chrome.action.setBadgeText({ text: formatBadge(next.timeMs, now) });
   await chrome.action.setBadgeBackgroundColor({ color: badgeColor(minutes) });
   await chrome.action.setTitle({
-    title: `${next.routeShortName} to ${next.headsign} · ${formatCountdown(
-      next.timeMs,
-      now,
-    )}${next.isLive ? " (live)" : ""} · ${badgeStopSuffix(picked)}`,
+    title: `${next.routeShortName} to ${next.headsign} · ${countdown}${
+      next.isLive ? " (live)" : ""
+    } · ${badgeStopSuffix(picked)}`,
   });
   return minutes;
 }

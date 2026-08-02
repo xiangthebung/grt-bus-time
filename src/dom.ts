@@ -73,4 +73,6 @@ export const ICONS = {
   bellOff:
     "M12 4a5 5 0 0 0-5 5v3.5L5.5 15.5h13L17 12.5V9a5 5 0 0 0-5-5Zm-2 13a2 2 0 0 0 4 0M4 4l16 16",
   close: "M6 6l12 12M18 6L6 18",
+  grip:
+    "M8 6h2v2H8zM14 6h2v2h-2zM8 11h2v2H8zM14 11h2v2h-2zM8 16h2v2H8zM14 16h2v2h-2z",
 } as const;

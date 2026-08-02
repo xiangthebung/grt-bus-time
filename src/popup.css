@@ -726,10 +726,69 @@ ul {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
 
+/* Card entry animation — plays once per popup session for each saved stop. */
+.stop-card.is-new {
+  animation: card-in 0.3s ease;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
 .stop-head {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+}
+
+/* Grip handle for drag-and-drop reorder. It lives with the other card tools so
+   the stop name keeps the full width of the identity column. */
+.stop-grip {
+  display: inline-flex;
+  cursor: grab;
+  opacity: 0.58;
+}
+
+.stop-grip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.stop-grip:hover,
+.stop-grip:focus-visible {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--surface-2);
+}
+
+.stop-grip:active {
+  cursor: grabbing;
+}
+
+.stop-grip:disabled {
+  cursor: default;
+}
+
+.stop-card.is-dragging .stop-grip {
+  opacity: 0.85;
+}
+
+/* The card being dragged. */
+.stop-card.is-dragging {
+  opacity: 0.42;
+}
+
+/* Drop indicator: a line above the card the dragged stop will land before. */
+.stop-card.is-drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent), var(--shadow-card);
+}
+
+/* Drop indicator: a line below the card the dragged stop will land after. */
+.stop-card.is-drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent), var(--shadow-card);
 }
 
 .stop-identity {
@@ -752,13 +811,13 @@ ul {
 .stop-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  row-gap: 4px;
   margin-top: 4px;
-  overflow: hidden;
   color: var(--text-muted);
   font-size: 10.5px;
   font-weight: 600;
-  white-space: nowrap;
 }
 
 .stop-meta .meta-code,
@@ -780,8 +839,8 @@ ul {
 }
 
 .stop-meta .meta-distance {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  white-space: nowrap;
 }
 
 .stop-tag {
@@ -823,6 +882,14 @@ ul {
 .tool-button:hover {
   color: var(--accent);
   background: var(--surface-2);
+}
+
+.tool-button:disabled,
+.tool-button:disabled:hover {
+  cursor: default;
+  color: var(--text-muted);
+  background: transparent;
+  opacity: 0.25;
 }
 
 .tool-button[aria-expanded="true"] {
@@ -874,22 +941,41 @@ ul {
   visibility: hidden;
 }
 
+/* Route choices get a dedicated row: the stop code, proximity tag and walking
+   distance should remain readable instead of being squeezed beside four chips. */
+.stop-route-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.stop-route-label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 /* ------------------------------------------------------------------ *
  * Route this card follows
  *
  * Buttons rather than a menu: the set is short, so showing all of it saves two
- * presses. They share the meta line with the stop code, which keeps the cost at
- * a few pixels of line height instead of a whole row per card. Wrapping, not
- * scrolling — a terminal stop with ten routes should make one card taller, not
- * hide half the answer behind a sideways scroll nobody notices.
+ * presses. Wrapping, not scrolling — a terminal stop with ten routes should make
+ * one card taller, not hide half the answer behind a sideways scroll nobody
+ * notices.
  * ------------------------------------------------------------------ */
 
 .stop-routes {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 3px;
+  gap: 4px;
 }
 
 .stop-route {

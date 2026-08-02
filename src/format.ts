@@ -63,6 +63,27 @@ export function formatDelay(delaySeconds: number): string {
     : `${Math.abs(minutes)} min early`;
 }
 
+/**
+ * A live prediction is overdue only after its predicted instant has passed.
+ * Keep the schedule delay separate from the countdown boundary: a bus can be
+ * late to the timetable while still having a future predicted arrival.
+ */
+export function formatOverdueDelay(
+  timeMs: number,
+  delaySeconds: number,
+  now = Date.now(),
+): string | undefined {
+  if (
+    !Number.isFinite(timeMs) ||
+    !Number.isFinite(delaySeconds) ||
+    timeMs > now ||
+    delaySeconds <= 0
+  ) {
+    return undefined;
+  }
+  return formatDelay(delaySeconds) || undefined;
+}
+
 export function formatDistance(meters: number): string {
   if (meters < 1000) return `${Math.round(meters / 10) * 10} m`;
   return `${(meters / 1000).toFixed(meters < 10_000 ? 1 : 0)} km`;
