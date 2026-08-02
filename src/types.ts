@@ -24,6 +24,14 @@ export type AlertLeadMinutes = (typeof ALERT_LEAD_OPTIONS)[number];
 export const DEPARTURES_PER_STOP_OPTIONS = [2, 3, 4, 5] as const;
 export const DEFAULT_DEPARTURES_PER_STOP = 3;
 
+/** GTFS direction_id values used by the route patterns in the static feed. */
+export const DIRECTION_IDS = ["0", "1"] as const;
+export type DirectionId = (typeof DIRECTION_IDS)[number];
+
+export function isDirectionId(value: unknown): value is DirectionId {
+  return value === "0" || value === "1";
+}
+
 export const MAX_SAVED_STOPS = 12;
 
 export interface Route {
@@ -97,13 +105,13 @@ export interface GtfsIndex {
 }
 
 /**
- * A rider's saved stop, optionally narrowed to a single route. One per stop.
+ * A rider's saved stop, optionally narrowed to a route and direction. One per stop.
  *
- * Most riders are waiting for one particular bus, so `routeId` is what the card,
- * the badge, and the arrival alert all filter on. Leaving it unset keeps the
- * older behaviour — whichever bus comes next — which is what every stop saved
- * before this field existed does, and what a rider who really does take the
- * first thing that shows up wants.
+ * Most riders are waiting for one particular bus, so `routeId` and `directionId`
+ * are what the card and badge filter on. Leaving them unset keeps the older
+ * behaviour — whichever bus comes next — which is what every stop saved before
+ * these fields existed does, and what a rider who really does take the first
+ * thing that shows up wants.
  */
 export interface SavedStop {
   id: string;
@@ -112,12 +120,16 @@ export interface SavedStop {
   stopName: string;
   /** When set, only this route counts for this entry. */
   routeId?: string;
+  /** When set with `routeId`, only this route's headsign/direction counts. */
+  directionId?: DirectionId;
   /**
    * Denormalised so the card can name the route before the feed has loaded, the
    * same reason `stopName` is stored. The live feed wins whenever it is around,
    * so a route GRT has since renamed corrects itself.
    */
   routeShortName?: string;
+  /** Denormalised headsign for showing the direction before the feed is ready. */
+  directionHeadsign?: string;
   createdAt: number;
   /** Manual sort position; lower comes first. */
   position: number;

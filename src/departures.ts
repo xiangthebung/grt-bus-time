@@ -19,6 +19,7 @@ import {
   TRIP_CANCELED,
   TRIP_DELETED,
   type Departure,
+  type DirectionId,
   type GtfsIndex,
   type RealtimeSnapshot,
   type RealtimeStopTime,
@@ -151,6 +152,8 @@ export interface DepartureQuery {
    * hourly route as having no service at all.
    */
   routeId?: string;
+  /** When set with `routeId`, only this route direction is returned. */
+  directionId?: DirectionId;
 }
 
 export interface DepartureBoard {
@@ -206,6 +209,9 @@ function collectScheduled(
       const routeIndex = index.tripRoute[tripIndex];
       // Before the budget is spent, so another route cannot use it up.
       if (query.routeId && index.routes[routeIndex].id !== query.routeId) continue;
+      if (query.directionId && String(index.tripDirection[tripIndex]) !== query.directionId) {
+        continue;
+      }
       candidates.push({
         tripIndex,
         tripId: index.tripIds[tripIndex],
@@ -294,6 +300,9 @@ function collectUnscheduledDepartures(
     const routeId = route?.id ?? state.trip.routeId;
     if (!routeId) continue;
     if (query.routeId && routeId !== query.routeId) continue;
+    const directionId =
+      tripIndex !== undefined ? String(index.tripDirection[tripIndex]) : undefined;
+    if (query.directionId && directionId !== query.directionId) continue;
     const headsign =
       tripIndex !== undefined
         ? (index.headsigns[index.tripHeadsign[tripIndex]] ?? "")

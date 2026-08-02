@@ -60,12 +60,14 @@ import { serviceDateKey } from "./time";
 import {
   ALERT_LEAD_OPTIONS,
   DEFAULT_ALERT_LEAD_MINUTES,
+  DIRECTION_IDS,
   DEFAULT_SETTINGS,
   EMPTY_REALTIME,
   MAX_SAVED_STOPS,
   patternKey,
   REALTIME_STALE_MS,
   type GtfsIndex,
+  type DirectionId,
   type Route,
   type SavedStop,
   type ServiceAlert,
@@ -175,7 +177,7 @@ interface AppState {
   distancesById?: Map<string, number>;
   nearestSavedId?: string;
   selectedRouteId: string;
-  selectedDirectionId: string;
+  selectedDirectionId: DirectionId | "";
   alertsExpanded: boolean;
   notificationsBlocked: boolean;
   flash?: { message: string; tone: "info" | "error" };
@@ -441,6 +443,7 @@ function boardFor(saved: SavedStop): DepartureBoard {
     // Wide enough to find later runs of whichever route comes first.
     limit: Math.min(24, state.settings.departuresPerStop * 4),
     ...(saved.routeId ? { routeId: saved.routeId } : {}),
+    ...(saved.directionId ? { directionId: saved.directionId } : {}),
   });
 }
 
@@ -1027,14 +1030,121 @@ function savedRouteLabel(saved: SavedStop): string | undefined {
   return known === saved.routeId ? (saved.routeShortName ?? known) : known;
 }
 
+interface DirectionChoice {
+  directionId: DirectionId;
+  headsign: string;
+  label: string;
+}
+
+interface RouteChoice {
+  routeId: string;
+  directionId?: DirectionId;
+  directionHeadsign?: string;
+  label: string;
+  name: string;
+  title: string;
+}
+
+function directionChoicesAt(stopId: string, routeId: string): DirectionChoice[] {
+  if (!state.index) return [];
+  return DIRECTION_IDS.flatMap((directionId) => {
+    const pattern = state.index?.patterns.get(patternKey(routeId, directionId));
+    if (!pattern || !pattern.stopIds.includes(stopId)) return [];
+    const headsign = pattern.headsigns.slice(0, 2).join(" / ");
+    return [
+      {
+        directionId,
+        headsign,
+        label: headsign ? `To ${headsign}` : `Direction ${directionId}`,
+      },
+    ];
+  });
+}
+
+function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoice[] {
+  return routeIds.flatMap((routeId) => {
+    const route = routeFor(routeId);
+    const shortName = route?.shortName ?? routeId;
+    const directions = directionChoicesAt(stopId, routeId);
+    if (directions.length === 0) {
+      return [
+        {
+          routeId,
+          label: shortName,
+          name: `Route ${shortName}`,
+          title: route?.longName ?? `Route ${shortName}`,
+        },
+      ];
+    }
+    return directions.map((direction) => ({
+      routeId,
+      directionId: direction.directionId,
+      directionHeadsign: direction.headsign || undefined,
+      label: `${shortName} · ${direction.label}`,
+      name: `Route ${shortName}, ${direction.label}`,
+      title: `${route?.longName ?? `Route ${shortName}`} · ${direction.label}`,
+    }));
+  });
+}
+
+function routeChoiceKey(choice: Pick<RouteChoice, "routeId" | "directionId">): string {
+  return `${choice.routeId}|${choice.directionId ?? ""}`;
+}
+
+function savedChoiceKey(saved: SavedStop | undefined): string {
+  return `${saved?.routeId ?? ""}|${saved?.directionId ?? ""}`;
+}
+
+function savedDirectionLabel(saved: SavedStop): string | undefined {
+  if (!saved.routeId || !saved.directionId) return undefined;
+  const current = directionChoicesAt(saved.stopId, saved.routeId).find(
+    (choice) => choice.directionId === saved.directionId,
+  );
+  if (current) return current.label;
+  return directionLabel(saved.directionId, saved.directionHeadsign);
+}
+
+function directionLabel(
+  directionId: DirectionId | undefined,
+  headsign?: string,
+): string | undefined {
+  if (!directionId) return undefined;
+  return headsign ? `To ${headsign}` : `Direction ${directionId}`;
+}
+
+function savedRouteDescription(saved: SavedStop): string | undefined {
+  const route = savedRouteLabel(saved);
+  if (!route) return undefined;
+  const direction = savedDirectionLabel(saved);
+  if (direction) return `${route} · ${direction}`;
+  if (saved.routeId && directionChoicesAt(saved.stopId, saved.routeId).length > 1) {
+    return `${route} · Any direction`;
+  }
+  return route;
+}
+
+function routeChoiceForSaved(saved: SavedStop | undefined): RouteChoice | undefined {
+  if (!saved?.routeId) return undefined;
+  const label = savedRouteDescription(saved) ?? saved.routeId;
+  const route = routeFor(saved.routeId);
+  return {
+    routeId: saved.routeId,
+    ...(saved.directionId ? { directionId: saved.directionId } : {}),
+    ...(saved.directionHeadsign ? { directionHeadsign: saved.directionHeadsign } : {}),
+    label,
+    name: label,
+    title: route ? route.longName : "No longer listed at this stop",
+  };
+}
+
 /**
- * Which route the card follows, as buttons rather than a menu.
+ * Which route and direction the card follows, as buttons rather than a menu.
  *
  * A menu hid the answer behind a press and hid the alternatives behind another
  * one, for a choice that is at most a handful of short numbers. They get their
  * own compact row below the stop metadata so the stop name and distance never
  * compete with route choices for the same horizontal pixels. Only drawn when
- * there is a choice to make — a stop with one route has none.
+ * there is a choice to make — a stop with one route and one direction has none.
  *
  * It also gives every stop saved before routes existed a way in. Those all
  * follow every route, and without this the only route choice would be on stops
@@ -1042,38 +1152,29 @@ function savedRouteLabel(saved: SavedStop): string | undefined {
  */
 function renderStopRoutes(saved: SavedStop): HTMLElement | undefined {
   const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
-  if (routeIds.length < 2) return undefined;
+  const routeChoices = routeChoicesAt(saved.stopId, routeIds);
+  const hasDirectionChoices = routeIds.some(
+    (routeId) => directionChoicesAt(saved.stopId, routeId).length > 1,
+  );
+  if (routeIds.length < 2 && !hasDirectionChoices) return undefined;
 
   // A route the feed has since stopped listing at this stop still gets a chip,
   // so the card cannot end up following a route with nothing selected.
-  const options = [
+  const savedChoice = routeChoiceForSaved(saved);
+  const savedChoiceIsListed = savedChoice
+    ? routeChoices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
+    : false;
+  const options: RouteChoice[] = [
     { routeId: "", label: "Any", name: "Every route", title: "Whichever bus comes next" },
-    ...routeIds.map((routeId) => {
-      const label = routeFor(routeId)?.shortName ?? routeId;
-      return {
-        routeId,
-        label,
-        name: `Route ${label}`,
-        title: routeFor(routeId)?.longName ?? `Route ${label}`,
-      };
-    }),
-    ...(saved.routeId && !routeIds.includes(saved.routeId)
-      ? [
-          {
-            routeId: saved.routeId,
-            label: savedRouteLabel(saved) ?? saved.routeId,
-            name: `Route ${savedRouteLabel(saved) ?? saved.routeId}`,
-            title: "No longer listed at this stop",
-          },
-        ]
-      : []),
+    ...(savedChoice && !savedChoiceIsListed ? [savedChoice] : []),
+    ...routeChoices,
   ];
 
   const row = element("div", { className: "stop-routes" });
   row.setAttribute("role", "radiogroup");
-  row.setAttribute("aria-label", `Route followed at ${saved.stopName}`);
+  row.setAttribute("aria-label", `Route and direction followed at ${saved.stopName}`);
   for (const option of options) {
-    const active = (saved.routeId ?? "") === option.routeId;
+    const active = savedChoiceKey(saved) === routeChoiceKey(option);
     const chip = button(`stop-route${active ? " is-active" : ""}`, {
       text: option.label,
       // "This one" rather than the route's long name: on the selected chip the
@@ -1083,9 +1184,18 @@ function renderStopRoutes(saved: SavedStop): HTMLElement | undefined {
       // state, so a label like "Follow route 31" would promise a press that the
       // selected chip does not perform.
       ariaLabel: option.name,
-      dataset: { focusKey: `route:${saved.id}:${option.routeId}` },
+      dataset: {
+        focusKey: `route:${saved.id}:${option.routeId}:${option.directionId ?? ""}`,
+      },
       onClick: () => {
-        if (!active) void changeStopRoute(saved, option.routeId);
+        if (!active) {
+          void changeStopRoute(
+            saved,
+            option.routeId,
+            option.directionId,
+            option.directionHeadsign,
+          );
+        }
       },
     });
     chip.setAttribute("role", "radio");
@@ -1100,11 +1210,11 @@ function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
   if (board.scheduleExpired) {
     return "The saved timetable does not cover today. Reload the schedule from settings.";
   }
-  const route = savedRouteLabel(saved);
+  const route = savedRouteDescription(saved);
   if (route) {
     // Naming the route matters here: other buses may well be running, and
     // "out of service" on its own would look like the whole stop was dead.
-    return `No route ${route} departures in the next day. Other routes may still serve this stop.`;
+    return `No departures for ${route} in the next day. Other buses may still serve this stop.`;
   }
   return "No departures in the next day. This stop may be out of service.";
 }
@@ -1136,7 +1246,7 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
   const routeChips = renderStopRoutes(saved);
-  const watchedRoute = savedRouteLabel(saved);
+  const watchedRoute = savedRouteDescription(saved);
   // Only when there are no chips to say it: with them, the selected one is
   // already the answer and a second copy on the same line is just noise.
   if (watchedRoute && !routeChips) {
@@ -1144,7 +1254,7 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       element("span", {
         className: "meta-route",
         text: watchedRoute,
-        title: `This card follows route ${watchedRoute} only`,
+        title: `This card only shows departures for ${watchedRoute}`,
       }),
     );
   }
@@ -1332,39 +1442,66 @@ interface ResultItemOptions {
   routeIds?: string[];
   /** The route being browsed in the route tab, if any. */
   browsingRouteId?: string;
+  /** The direction being browsed in the route tab, if any. */
+  browsingDirectionId?: DirectionId;
 }
 
 /**
- * The route a press on the row itself saves: the one being browsed if there is
- * one, otherwise the first at the stop.
+ * The route/direction a press on the row itself saves: the one being browsed if
+ * one is selected, otherwise the first choice at the stop.
  *
- * Choosing a route and then walking its stops is a rider saying which bus they
- * want, so the row takes them at their word rather than reverting to whichever
- * route the feed happens to list first. "Any" is never the default — someone at a
- * stop is waiting for a bus, not for all of them — but it stays one press away.
+ * Choosing a route and direction and then walking its stops is a rider saying
+ * which bus they want, so the row takes them at their word rather than reverting
+ * to whichever choice the feed happens to list first. "Any" is never the default
+ * — someone at a stop is waiting for a bus, not for all of them — but it stays one
+ * press away.
  */
-function defaultRouteAt(
-  routes: readonly string[],
-  browsing?: string,
-): string | undefined {
-  if (browsing && routes.includes(browsing)) return browsing;
-  return routes[0];
+function defaultRouteChoice(
+  choices: readonly RouteChoice[],
+  browsingRouteId?: string,
+  browsingDirectionId?: DirectionId,
+): RouteChoice | undefined {
+  if (browsingRouteId && browsingDirectionId) {
+    const exact = choices.find(
+      (choice) =>
+        choice.routeId === browsingRouteId && choice.directionId === browsingDirectionId,
+    );
+    if (exact) return exact;
+  }
+  if (browsingRouteId) {
+    const route = choices.find((choice) => choice.routeId === browsingRouteId);
+    if (route) return route;
+  }
+  return choices[0];
 }
 
 /**
- * A stop in the picker: its name and code, then one button per route it serves.
+ * A stop in the picker: its name and code, then one button per route/direction
+ * choice it serves.
  *
- * The route numbers are the save action rather than decoration on a row that
- * saves the whole stop. Riders are waiting for one particular bus, so the number
- * they came here for and the thing they press are the same object, and every
- * option is labelled — there is no press whose meaning has to be inferred.
+ * The route/destination choices are the save action rather than decoration on a
+ * row that saves the whole stop. Riders are waiting for one particular bus, so
+ * the choice they came here for and the thing they press are the same object,
+ * and every option is labelled — there is no press whose meaning has to be
+ * inferred.
  */
 function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   const routes = routesAt(stop, options.routeIds);
   const saved = savedStopFor(stop.id);
-  // `undefined` for a stop that is not saved, `""` for one saved without a route.
-  const current = saved ? (saved.routeId ?? "") : undefined;
-  const fallback = defaultRouteAt(routes, options.browsingRouteId);
+  const routeChoices = routeChoicesAt(stop.id, routes);
+  const savedChoice = routeChoiceForSaved(saved);
+  // Preserve a route-only saved entry as an explicit `Any direction` choice
+  // when the current feed offers direction-specific choices for that route.
+  const choices = savedChoice &&
+      !routeChoices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
+    ? [savedChoice, ...routeChoices]
+    : routeChoices;
+  const current = savedChoiceKey(saved);
+  const fallback = defaultRouteChoice(
+    choices,
+    options.browsingRouteId,
+    options.browsingDirectionId,
+  );
 
   const meta = element("div", { className: "result-meta" }, [
     element("span", { text: `Stop ${stop.code}` }),
@@ -1373,34 +1510,41 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
       : undefined,
   ]);
 
-  // Every route is offered, not the first six: each one is a button, and a hidden
-  // button is an option the rider cannot take.
+  // Every route/direction choice is offered, not the first six: each one is a
+  // button, and a hidden button is an option the rider cannot take.
   const chips = element("div", { className: "result-routes" });
   chips.setAttribute("role", "group");
-  chips.setAttribute("aria-label", `Route to follow at ${stop.name}`);
-  for (const routeId of routes) {
-    const route = routeFor(routeId);
-    const shortName = route?.shortName ?? routeId;
-    const isCurrent = current === routeId;
+  chips.setAttribute("aria-label", `Route and direction to follow at ${stop.name}`);
+  for (const choice of choices) {
+    const isCurrent = current === routeChoiceKey(choice);
     // Marked so a press on the row is predictable without having to hover it.
-    const isDefault = !isCurrent && routeId === fallback;
+    const isDefault =
+      !isCurrent &&
+      fallback !== undefined &&
+      routeChoiceKey(choice) === routeChoiceKey(fallback);
     const chip = button(
       `result-route${isCurrent ? " is-current" : ""}${isDefault ? " is-default" : ""}`,
       {
-        text: shortName,
+        text: choice.label,
         title: isCurrent
-          ? "Already the route for this saved stop"
+          ? "Already the choice for this saved stop"
           : isDefault
-            ? `${route?.longName ?? `Route ${shortName}`} · pressing the row saves this`
-            : (route?.longName ?? `Route ${shortName}`),
+            ? `${choice.title} · pressing the row saves this`
+            : choice.title,
         ariaLabel: isCurrent
-          ? `${stop.name} already follows route ${shortName}`
-          : `Save route ${shortName} at ${stop.name}`,
-        onClick: () => void saveStop(stop, routeId),
+          ? `${stop.name} already follows ${choice.name}`
+          : `Save ${choice.name} at ${stop.name}`,
+        onClick: () =>
+          void saveStop(
+            stop,
+            choice.routeId,
+            choice.directionId,
+            choice.directionHeadsign,
+          ),
       },
     );
     chip.disabled = isCurrent;
-    if (!isCurrent) paintRouteChip(chip, routeId);
+    if (!isCurrent && choice.routeId) paintRouteChip(chip, choice.routeId);
     chips.append(chip);
   }
 
@@ -1408,8 +1552,8 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
   // stop with one route the two are the same answer, and a second button saying
   // so is a choice the rider has to think about for nothing — unless it is what
   // the stop is already following, which has to stay visible.
-  if (routes.length !== 1 || current === "") {
-    const isCurrent = current === "";
+  if (routes.length !== 1 || (saved !== undefined && !saved.routeId)) {
+    const isCurrent = saved !== undefined && !saved.routeId;
     const anyChip = button(`result-route is-any${isCurrent ? " is-current" : ""}`, {
       text: "Any",
       title: isCurrent
@@ -1444,16 +1588,24 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
    * is reachable by tab. Only wired up when it would change something, so the box
    * does not offer a press that does nothing.
    */
-  if (current !== (fallback ?? "")) {
+  const rowChangesSelection = fallback
+    ? current !== routeChoiceKey(fallback)
+    : saved === undefined;
+  if (rowChangesSelection) {
     const label = fallback
-      ? `Save route ${routeFor(fallback)?.shortName ?? fallback} at ${stop.name}`
+      ? `Save ${fallback.name} at ${stop.name}`
       : `Save ${stop.name}`;
     entry.classList.add("is-pressable");
     entry.title = label;
     entry.addEventListener("click", (event) => {
       // A chip speaks for itself.
       if ((event.target as HTMLElement).closest("button")) return;
-      void saveStop(stop, fallback);
+      void saveStop(
+        stop,
+        fallback?.routeId,
+        fallback?.directionId,
+        fallback?.directionHeadsign,
+      );
     });
   }
 
@@ -1527,7 +1679,7 @@ function renderRoutePane(): void {
   el.routeSelect.value = state.selectedRouteId;
 
   const directions = state.selectedRouteId
-    ? ["0", "1"].filter((directionId) =>
+    ? DIRECTION_IDS.filter((directionId) =>
         state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
       )
     : [];
@@ -1535,7 +1687,8 @@ function renderRoutePane(): void {
   el.directionChips.replaceChildren();
   for (const directionId of directions) {
     const pattern = state.index.patterns.get(patternKey(state.selectedRouteId, directionId));
-    const label = pattern?.headsigns.slice(0, 2).join(" / ") || `Direction ${directionId}`;
+    const headsign = pattern?.headsigns.slice(0, 2).join(" / ");
+    const label = headsign ? `To ${headsign}` : `Direction ${directionId}`;
     const chip = button("chip", {
       text: label,
       onClick: () => {
@@ -1562,7 +1715,13 @@ function renderRoutePane(): void {
       const routeIds = state.index?.routeIdsByStop.get(stopId) ?? [];
       // Browsing a route is a rider naming the bus they want, so it becomes what
       // a press on the row saves rather than the feed's first route at the stop.
-      return [resultItem(stop, { routeIds, browsingRouteId: state.selectedRouteId })];
+      return [
+        resultItem(stop, {
+          routeIds,
+          browsingRouteId: state.selectedRouteId,
+          browsingDirectionId: state.selectedDirectionId || undefined,
+        }),
+      ];
     }),
   );
 }
@@ -1812,7 +1971,12 @@ async function afterStopsChanged(stops: SavedStop[]): Promise<void> {
  * already on the list points that card at the new route rather than adding a
  * second one beside it.
  */
-async function saveStop(stop: Stop, routeId?: string): Promise<void> {
+async function saveStop(
+  stop: Stop,
+  routeId?: string,
+  directionId?: DirectionId,
+  directionHeadsign?: string,
+): Promise<void> {
   const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
   const moved = Boolean(savedStopFor(stop.id));
   try {
@@ -1822,12 +1986,19 @@ async function saveStop(stop: Stop, routeId?: string): Promise<void> {
       stopName: stop.name,
       ...(routeId ? { routeId } : {}),
       ...(shortName ? { routeShortName: shortName } : {}),
+      ...(routeId && directionId ? { directionId } : {}),
+      ...(routeId && directionId && directionHeadsign
+        ? { directionHeadsign }
+        : {}),
     });
     state.pickerOpen = false;
     state.searchTerm = "";
     el.stopSearch.value = "";
     await afterStopsChanged(stops);
-    const route = routeId ? `route ${shortName ?? routeId}` : "every route";
+    const direction = routeId ? directionLabel(directionId, directionHeadsign) : undefined;
+    const route = routeId
+      ? `route ${shortName ?? routeId}${direction ? ` · ${direction}` : ""}`
+      : "every route";
     flashStatus(
       moved ? `Now following ${route} · ${stop.name}` : `Saved · ${route} at ${stop.name}`,
     );
@@ -1836,15 +2007,27 @@ async function saveStop(stop: Stop, routeId?: string): Promise<void> {
   }
 }
 
-/** Changes which route a saved card follows, or widens it back to every route. */
-async function changeStopRoute(saved: SavedStop, routeId: string): Promise<void> {
+/** Changes which route/direction a saved card follows, or widens it back to every route. */
+async function changeStopRoute(
+  saved: SavedStop,
+  routeId: string,
+  directionId?: DirectionId,
+  directionHeadsign?: string,
+): Promise<void> {
   try {
     const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
-    const stops = await setStopRoute(saved.id, routeId || undefined, shortName);
+    const stops = await setStopRoute(
+      saved.id,
+      routeId || undefined,
+      shortName,
+      routeId ? directionId : undefined,
+      routeId ? directionHeadsign : undefined,
+    );
     await afterStopsChanged(stops);
+    const direction = routeId ? directionLabel(directionId, directionHeadsign) : undefined;
     flashStatus(
       routeId
-        ? `Following route ${shortName ?? routeId} · ${saved.stopName}`
+        ? `Following route ${shortName ?? routeId}${direction ? ` · ${direction}` : ""} · ${saved.stopName}`
         : `Following every route · ${saved.stopName}`,
     );
   } catch (error) {
@@ -2115,7 +2298,7 @@ el.emptySearchButton.addEventListener("click", () => {
 
 el.routeSelect.addEventListener("change", () => {
   state.selectedRouteId = el.routeSelect.value;
-  const directions = ["0", "1"].filter((directionId) =>
+  const directions = DIRECTION_IDS.filter((directionId) =>
     state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
   );
   state.selectedDirectionId = directions.length === 1 ? directions[0] : "";

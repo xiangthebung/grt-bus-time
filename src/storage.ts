@@ -2,11 +2,12 @@
  * Saved stops and rider settings, kept in `chrome.storage.sync` so they follow
  * the rider between browsers.
  *
- * One entry per stop, holding the route the rider is waiting for there. A stop is
- * one place, so two entries for it would be two cards with the same name and the
- * same code, each carrying a route selector that only spoke for one of them —
- * asking a rider to tell them apart by reading their departures. Choosing a
- * different route at a stop already saved moves that stop's entry instead.
+ * One entry per stop, holding the route/direction the rider is waiting for there.
+ * A stop is one place, so two entries for it would be two cards with the same
+ * name and the same code, each carrying a route selector that only spoke for one
+ * of them — asking a rider to tell them apart by reading their departures.
+ * Choosing a different route or direction at a stop already saved moves that
+ * stop's entry instead.
  *
  * Entries written by the very first version were per route + direction + stop and
  * are collapsed on first read, as are any duplicates an older build let through.
@@ -17,6 +18,7 @@ import {
   DEFAULT_SETTINGS,
   DEPARTURES_PER_STOP_OPTIONS,
   MAX_SAVED_STOPS,
+  isDirectionId,
   type LegacyWatch,
   type SavedStop,
   type Settings,
@@ -37,6 +39,8 @@ function isSavedStop(value: unknown): value is SavedStop {
 }
 
 function normalize(stop: SavedStop, fallbackPosition: number): SavedStop {
+  const routeId = typeof stop.routeId === "string" && stop.routeId ? stop.routeId : undefined;
+  const directionId = routeId && isDirectionId(stop.directionId) ? stop.directionId : undefined;
   return {
     id: stop.id,
     stopId: stop.stopId,
@@ -44,14 +48,17 @@ function normalize(stop: SavedStop, fallbackPosition: number): SavedStop {
     stopName: stop.stopName,
     // An empty string would read as a route filter that matches nothing, so it
     // is dropped back to "every route" along with a missing value.
-    ...(typeof stop.routeId === "string" && stop.routeId
-      ? { routeId: stop.routeId }
-      : {}),
-    ...(typeof stop.routeId === "string" &&
-    stop.routeId &&
+    ...(routeId ? { routeId } : {}),
+    ...(routeId &&
     typeof stop.routeShortName === "string" &&
     stop.routeShortName
       ? { routeShortName: stop.routeShortName }
+      : {}),
+    ...(directionId ? { directionId } : {}),
+    ...(directionId &&
+    typeof stop.directionHeadsign === "string" &&
+    stop.directionHeadsign
+      ? { directionHeadsign: stop.directionHeadsign }
       : {}),
     createdAt: typeof stop.createdAt === "number" ? stop.createdAt : Date.now(),
     position:
@@ -155,6 +162,10 @@ export interface NewSavedStop {
   /** Omit to watch every route at the stop. */
   routeId?: string;
   routeShortName?: string;
+  /** When set with `routeId`, omit departures in the other direction. */
+  directionId?: SavedStop["directionId"];
+  /** Cached only for the picker/card label while the feed is loading. */
+  directionHeadsign?: string;
 }
 
 function savedStopFor(stops: readonly SavedStop[], stopId: string): SavedStop | undefined {
@@ -172,7 +183,13 @@ export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
   const stops = await getSavedStops();
   const existing = savedStopFor(stops, stop.stopId);
   if (existing) {
-    return setStopRoute(existing.id, stop.routeId, stop.routeShortName);
+    return setStopRoute(
+      existing.id,
+      stop.routeId,
+      stop.routeShortName,
+      stop.directionId,
+      stop.directionHeadsign,
+    );
   }
   if (stops.length >= MAX_SAVED_STOPS) {
     throw new Error(`You can save up to ${MAX_SAVED_STOPS} stops.`);
@@ -187,6 +204,8 @@ export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
         stopName: stop.stopName,
         ...(stop.routeId ? { routeId: stop.routeId } : {}),
         ...(stop.routeShortName ? { routeShortName: stop.routeShortName } : {}),
+        ...(stop.directionId ? { directionId: stop.directionId } : {}),
+        ...(stop.directionHeadsign ? { directionHeadsign: stop.directionHeadsign } : {}),
         createdAt: Date.now(),
         position: stops.length,
       },
@@ -196,15 +215,22 @@ export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
 }
 
 /**
- * Narrows an entry to one route, or widens it back to every route when
- * `routeId` is omitted.
+ * Narrows an entry to one route/direction, or widens it back to every route
+ * when `routeId` is omitted.
  */
 export async function setStopRoute(
   id: string,
   routeId?: string,
   routeShortName?: string,
+  directionId?: SavedStop["directionId"],
+  directionHeadsign?: string,
 ): Promise<SavedStop[]> {
-  return updateSavedStop(id, { routeId, routeShortName });
+  return updateSavedStop(id, {
+    routeId,
+    routeShortName,
+    directionId,
+    directionHeadsign,
+  });
 }
 
 export async function removeSavedStop(id: string): Promise<SavedStop[]> {

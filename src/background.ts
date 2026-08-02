@@ -352,6 +352,7 @@ async function updateBadge(lookup: RealtimeLookup): Promise<number | undefined> 
     // The badge counts down the same bus the card does, so the icon and the
     // popup cannot disagree about which one is next.
     ...(picked.stop.routeId ? { routeId: picked.stop.routeId } : {}),
+    ...(picked.stop.directionId ? { directionId: picked.stop.directionId } : {}),
   });
   const next = board.departures[0];
 
@@ -443,6 +444,7 @@ async function updateAlerts(lookup: RealtimeLookup): Promise<number | undefined>
       // An alert on a narrowed stop is about that route: another bus pulling in
       // is not what the rider asked to be told about.
       ...(stop.routeId ? { routeId: stop.routeId } : {}),
+      ...(stop.directionId ? { directionId: stop.directionId } : {}),
     });
     const next = board.departures[0];
     if (!next) continue;

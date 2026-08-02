@@ -25,7 +25,7 @@ globalThis.chrome = {
   },
 };
 
-const { reorderSavedStops } = await import("../src/storage.ts");
+const { reorderSavedStops, setStopRoute } = await import("../src/storage.ts");
 
 test("reorderSavedStops persists a complete order and rejects incomplete orders", async () => {
   const reordered = await reorderSavedStops(["c", "a", "b"]);
@@ -59,4 +59,20 @@ test("reorderSavedStops persists a complete order and rejects incomplete orders"
     ],
     "an order containing an unknown stop must be ignored",
   );
+});
+
+test("setStopRoute persists and clears a direction with the route filter", async () => {
+  const narrowed = await setStopRoute("a", "r13", "13", "1", "Fairview Park Mall");
+  assert.equal(narrowed[1].directionId, "1");
+  assert.equal(narrowed[1].directionHeadsign, "Fairview Park Mall");
+
+  const routeOnly = await setStopRoute("a", "r13", "13");
+  assert.equal(routeOnly[1].routeId, "r13");
+  assert.equal(routeOnly[1].directionId, undefined);
+  assert.equal(routeOnly[1].directionHeadsign, undefined);
+
+  const everyRoute = await setStopRoute("a");
+  assert.equal(everyRoute[1].routeId, undefined);
+  assert.equal(everyRoute[1].directionId, undefined);
+  assert.equal(everyRoute[1].directionHeadsign, undefined);
 });
