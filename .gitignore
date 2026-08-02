@@ -7,6 +7,9 @@ node_modules/
 dist/
 dist-free/
 
+# The Pro build is also synced into the repository root so a GitHub source
+# download can be loaded directly by Chrome. Those root files are intentional.
+
 # Store upload artifacts, produced by `npm run zip`.
 artifacts/
 *.zip

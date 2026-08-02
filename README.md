@@ -12,19 +12,24 @@ Requirements: Node 20+ and Chrome.
 
 ```bash
 npm install
-npm run build          # -> dist/
+npm run build          # -> dist/ and the repository root
 ```
 
-Then load it:
+`npm run build` also copies the Pro build into the repository root. This keeps
+the GitHub source download directly loadable for users who do not have Node.js.
+
+To load a GitHub download:
 
 1. open `chrome://extensions`
 2. turn on **Developer mode** (top right)
 3. click **Load unpacked**
-4. select the `dist/` folder
+4. extract the GitHub ZIP and select the extracted repository folder — the one
+   containing `manifest.json`
 
-Load `dist/`, not the repository root and not `dist-free/`. `dist/` is the Pro
-channel and the one to develop against; `dist-free/` exists only to be packaged
-for the second store listing.
+For local development, `dist/` is still the Pro build output and
+`dist-free/` exists only to be packaged for the second store listing. The
+repository root is a synced copy of the Pro build intended for direct loading
+from GitHub.
 
 ## Two channels, one codebase
 

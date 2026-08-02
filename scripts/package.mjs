@@ -8,9 +8,9 @@
  * both steps so the archive can only ever contain what was just built.
  *
  * This project publishes two listings from one codebase, so it keeps two output
- * directories. The rule that makes it consistent with the other extensions here
- * is simply: `dist/` is the one you load in Chrome. `dist-free/` exists only to
- * be packaged.
+ * directories. `dist/` is the Pro build used for packaging, while the
+ * repository root is synced for direct GitHub downloads. `dist-free/` exists
+ * only to be packaged.
  */
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
