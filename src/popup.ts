@@ -1469,6 +1469,13 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
     options.distanceMeters !== undefined
       ? element("span", { text: formatDistance(options.distanceMeters) })
       : undefined,
+    saved
+      ? element("span", {
+          className: "result-added",
+          text: "Added",
+          title: "This stop is already in your saved stops",
+        })
+      : undefined,
   ]);
 
   const select = element("select", {
@@ -1485,7 +1492,9 @@ function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
     ? saved.routeId
       ? savedChoiceKey(saved)
       : ANY_ROUTE_VALUE
-    : "";
+    : options.browsingRouteId && fallback
+      ? routeChoiceKey(fallback)
+      : "";
   select.addEventListener("change", () => {
     if (!select.value) return;
     const choice =

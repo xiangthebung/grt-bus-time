@@ -1414,6 +1414,20 @@ ul {
   font-size: 10.5px;
 }
 
+.result-added {
+  display: inline-flex;
+  min-height: 17px;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 /* Route and destination are one compact control, kept in the result card so a
    stop with several routes does not become a row of competing buttons. */
 .result-choice-row {
