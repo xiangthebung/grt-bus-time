@@ -499,7 +499,7 @@ function buildRealtimeFeeds(trips) {
 
   for (const card of CARDS) {
     // Only the head departure is predicted. The follow-up times stay scheduled,
-    // which is exactly what the popup's "then 12 min · 22 min" line reports.
+    // which exercises the popup's mixed live-and-scheduled arrival treatment.
     const trip = tripsById.get(`${card.routeId}-${card.stopId}-0`);
     const route = trip.route;
     const predictedSec = Math.floor((NOW + card.minutes * 60_000) / 1000);
@@ -591,6 +591,8 @@ function savedStopsSeed({ withAlerts = false, cards = CARDS.length } = {}) {
       stopName: name,
       routeId: card.routeId,
       routeShortName: routeById.get(card.routeId).shortName,
+      directionId: "0",
+      directionHeadsign: routeById.get(card.routeId).headsign,
       createdAt: NOW - (CARDS.length - index) * 86_400_000,
       position: index,
       ...(withAlerts && card.alertLeadMinutes
@@ -1003,13 +1005,20 @@ async function proChannel(feed, realtime) {
       stop: card.querySelector(".stop-name")?.textContent,
       meta: card.querySelector(".stop-meta")?.innerText.replace(/\s+/g, " ").trim(),
       route: card.querySelector(".route-badge")?.textContent,
+      savedRoute: card.querySelector(".saved-route-line")?.innerText.replace(/\s+/g, " ").trim(),
       headsign: card.querySelector(".headsign")?.textContent,
       note: card.querySelector(".departure-note")?.innerText.replace(/\s+/g, " ").trim(),
-      then: card.querySelector(".departure-then")?.innerText.replace(/\s+/g, " ").trim(),
+      arrivals: card.querySelector(".arrival-times")?.innerText.replace(/\s+/g, " ").trim(),
       countdown: card.querySelector(".countdown")?.textContent,
-      clock: card.querySelector(".clock")?.textContent,
     })),
   );
+  for (const [index, card] of facts.entries()) {
+    const missing = ["stop", "route", "savedRoute", "headsign", "countdown", "arrivals"]
+      .filter((key) => !card[key]);
+    if (missing.length > 0) {
+      throw new Error(`Store fixture card ${index + 1} is missing: ${missing.join(", ")}`);
+    }
+  }
   await list.close();
 
   /* --- the same countdown, big ------------------------------------- */
@@ -1043,7 +1052,8 @@ async function proChannel(feed, realtime) {
     await alerts.locator("#alerts-toggle").click();
     await alerts.waitForSelector("#alerts-list:not([hidden])");
   } else {
-    process.stdout.write("  ! the service-alert accordion did not appear\n");
+    await alerts.close();
+    throw new Error("Store fixture did not render the required service-alert accordion.");
   }
   // A real confirmation from the extension, produced by really changing the lead
   // time. Nothing here writes text into the popup.
@@ -1054,6 +1064,10 @@ async function proChannel(feed, realtime) {
   await alerts.evaluate(() => document.activeElement?.blur());
   const flash = await alerts.locator("#feed-state-text").innerText();
   const alertText = await alerts.locator(".alert-item").first().innerText();
+  if (!alertText.includes("Active ")) {
+    await alerts.close();
+    throw new Error("Store fixture service alert is missing its active-period context.");
+  }
   const alertsShot = await shootPopup(alerts);
   await alerts.close();
 
@@ -1081,7 +1095,7 @@ async function proChannel(feed, realtime) {
       points: [
         "Live predictions from GRT's realtime feed, marked <strong>Live</strong> and never mixed up with the timetable",
         "How late the bus is running, and how many stops back it currently is",
-        "Pick the one route you are actually waiting for, or leave it on whichever comes next",
+        "Pick the route and direction you are actually waiting for, or choose any direction",
         "Falls back to the published schedule when the feed is unreachable, and says so",
       ],
       foot: UNOFFICIAL,
@@ -1222,12 +1236,28 @@ async function freeChannel(feed, realtime) {
           .slice(0, 3)
           .map((node) => node.textContent),
       ),
+      mapLinks: await prober.evaluate(() =>
+        [...document.querySelectorAll("#search-results .result-map-link")]
+          .slice(0, 3)
+          .map((node) => node.getAttribute("href")),
+      ),
+      hint: await prober.locator("#search-hint").innerText(),
     }))
     .catch(async () => ({
       used: false,
       message: await prober.locator("#feed-state-text").innerText().catch(() => ""),
     }));
   await prober.close();
+  if (!nearby.used || nearby.results?.length === 0) {
+    throw new Error("Store fixture could not use the Free build's nearby-stop search.");
+  }
+  if (
+    nearby.mapLinks?.length === 0 ||
+    nearby.mapLinks.some((href) => !href?.startsWith("https://www.google.com/maps/")) ||
+    !nearby.hint?.includes("straight-line")
+  ) {
+    throw new Error("Store fixture could not verify nearby distance and map details.");
+  }
 
   await shoot(
     context,
@@ -1311,7 +1341,7 @@ async function main() {
   for (const card of pro.facts) {
     process.stdout.write(
       `  ${card.route} ${card.stop} -> ${card.headsign}\n` +
-        `      ${card.countdown} (${card.clock})  ${card.note}  ${card.then}\n` +
+        `      ${card.countdown}  ${card.note}  ${card.arrivals}\n` +
         `      ${card.meta}\n`,
     );
   }

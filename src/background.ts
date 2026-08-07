@@ -34,14 +34,14 @@ import {
   type NotificationStatusPayload,
   type ScheduleReadyPayload,
 } from "./messages";
-import { getPaymentUser, PAYMENTS_CONFIGURED, startPaymentBackground } from "./payments";
+import { getPaymentAccess, PAYMENTS_CONFIGURED, startPaymentBackground } from "./payments";
 import { IS_PRO_BUILD } from "./pro";
 import { getSavedStops, getSettings } from "./storage";
 import {
   ALERT_LEAD_OPTIONS,
   DEFAULT_ALERT_LEAD_MINUTES,
   EMPTY_REALTIME,
-  REALTIME_STALE_MS,
+  realtimePredictionsFresh,
   type GtfsIndex,
   type RealtimeSnapshot,
   type SavedStop,
@@ -137,13 +137,9 @@ async function hasProAccess(force = false): Promise<boolean> {
   if (!force && Date.now() - paidAccessCheckedAt < PAYMENT_CACHE_MS) {
     return paidAccess;
   }
-  try {
-    const user = await getPaymentUser();
-    paidAccess = Boolean(user?.paid);
-    paidAccessCheckedAt = Date.now();
-  } catch (error) {
-    console.warn("Could not verify Pro access", error);
-  }
+  const access = await getPaymentAccess();
+  paidAccess = access.paid;
+  paidAccessCheckedAt = Date.now();
   return paidAccess;
 }
 
@@ -160,6 +156,7 @@ async function ensureSchedule(force = false): Promise<ScheduleReadyPayload> {
         routeCount: index.routes.length,
         stopCount: index.stops.length,
         fromCache: true,
+        stale: false,
       };
     }
   }
@@ -182,6 +179,7 @@ async function ensureSchedule(force = false): Promise<ScheduleReadyPayload> {
       routeCount: fresh.routes.length,
       stopCount: fresh.stops.length,
       fromCache: false,
+      stale: false,
     };
   } catch (error) {
     // A usable-but-stale copy beats no schedule at all.
@@ -191,6 +189,7 @@ async function ensureSchedule(force = false): Promise<ScheduleReadyPayload> {
         routeCount: index.routes.length,
         stopCount: index.stops.length,
         fromCache: true,
+        stale: true,
       };
     }
     throw error;
@@ -223,7 +222,7 @@ async function getRealtime(force = false): Promise<RealtimeSnapshot> {
 
 /** Predictions past their shelf life are dropped in favour of the timetable. */
 function usableRealtime(): RealtimeLookup {
-  return Date.now() - realtime.fetchedAt > REALTIME_STALE_MS
+  return !realtimePredictionsFresh(realtime)
     ? prepareRealtime(EMPTY_REALTIME)
     : prepareRealtime(realtime);
 }
@@ -243,9 +242,10 @@ async function badgeLookup(): Promise<RealtimeLookup> {
   // Only fetch when the alternative is falling back to the timetable. Keeping
   // predictions merely fresh is the tick's job, and refetching more eagerly than
   // this would double the polling rate whenever the popup is open.
-  if (Date.now() - realtime.fetchedAt <= REALTIME_STALE_MS) return prepareRealtime(realtime);
+  if (realtimePredictionsFresh(realtime)) return prepareRealtime(realtime);
   try {
-    return prepareRealtime(await getRealtime());
+    const latest = await getRealtime();
+    return realtimePredictionsFresh(latest) ? prepareRealtime(latest) : prepareRealtime(EMPTY_REALTIME);
   } catch (error) {
     console.warn("Could not refresh predictions for the badge", error);
     return usableRealtime();
@@ -352,6 +352,7 @@ async function updateBadge(lookup: RealtimeLookup): Promise<number | undefined> 
     // The badge counts down the same bus the card does, so the icon and the
     // popup cannot disagree about which one is next.
     ...(picked.stop.routeId ? { routeId: picked.stop.routeId } : {}),
+    ...(picked.stop.directionId ? { directionId: picked.stop.directionId } : {}),
   });
   const next = board.departures[0];
 
@@ -443,6 +444,7 @@ async function updateAlerts(lookup: RealtimeLookup): Promise<number | undefined>
       // An alert on a narrowed stop is about that route: another bus pulling in
       // is not what the rider asked to be told about.
       ...(stop.routeId ? { routeId: stop.routeId } : {}),
+      ...(stop.directionId ? { directionId: stop.directionId } : {}),
     });
     const next = board.departures[0];
     if (!next) continue;
@@ -556,7 +558,11 @@ async function tick(options: { forceFetch?: boolean } = {}): Promise<void> {
   const minutes = await getMinutesToNextDeparture();
   const near = minutes === undefined || minutes <= NEAR_DEPARTURE_MINUTES;
   const age = Date.now() - realtime.fetchedAt;
-  if (options.forceFetch || age >= (near ? FETCH_AGE_NEAR_MS : FETCH_AGE_IDLE_MS)) {
+  if (
+    options.forceFetch ||
+    !realtimePredictionsFresh(realtime) ||
+    age >= (near ? FETCH_AGE_NEAR_MS : FETCH_AGE_IDLE_MS)
+  ) {
     try {
       await getRealtime(true);
     } catch (error) {

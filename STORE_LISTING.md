@@ -35,8 +35,9 @@ next departure on the toolbar icon and as a notification shortly before it arriv
 
 ## Detailed description
 
-Save the stops you actually travel from, pick the route you are actually waiting for,
-and the next departure is one click away.
+Save the stops you actually travel from, pick the route, and the next departure is one
+click away. The destination is inferred from the physical GRT stop ID; shared platforms
+show separate destination choices when needed.
 
 GRT Next Bus reads the Region of Waterloo's own open data: the published timetable and
 the live feed the buses report into. It shows you which one a time came from, so a
@@ -44,7 +45,8 @@ prediction is never quietly presented as a promise.
 
 Both builds include:
 
-- Up to twelve saved stop-and-route pairs, with duplicate pairs prevented.
+- Up to twelve saved stop-and-route journeys, with destination inferred from the stop ID
+  and duplicate journeys prevented.
 - The soonest departure and the two after it, as a countdown inside the hour and a
   clock time beyond it.
 - Times marked **Live** come from the bus. Everything else is the published schedule,
@@ -54,6 +56,7 @@ Both builds include:
   website you have to remember to check.
 - Find stops near you, or search by the stop number printed on the pole, or walk a
   route's stops in order.
+- Open a nearby stop's public location in Google Maps when you need to navigate there.
 - When the live feed cannot be reached, it falls back to the timetable and tells you
   it has done so instead of showing nothing.
 - Light, dark, or follow the system.
@@ -73,11 +76,10 @@ when you turn it on, is compared against stop coordinates already on your device
 is never transmitted anywhere — there is no reverse-geocoding call, no analytics, and
 no server of ours in the middle.
 
-Pricing for the paid build: `TODO: confirm in the ExtensionPay dashboard.` The
-extension deliberately does not hard-code a price; it reads the current plans from
-ExtensionPay at runtime so the amount in the popup and the amount at checkout come
-from one place. Fill in the amounts here from the dashboard before publishing, and
-keep them in step with `TERMS_OF_SALE.md`.
+Pricing for the paid build is shown at checkout. The extension deliberately does
+not hard-code a price; it reads the current plans from ExtensionPay at runtime so
+the amount in the popup and the amount at checkout come from one place. Confirm
+the live plans in the ExtensionPay dashboard before publishing.
 
 Limits worth stating plainly: departures are only as good as the Region's feeds, and
 when those are down, stale or wrong, this extension is wrong with them. Background
@@ -87,13 +89,13 @@ catch a bus you cannot afford to miss.
 
 ## Permission justifications
 
-Paid build (`dist/`) — `storage`, `alarms`, `geolocation`, `offscreen`, optional
+Paid build (`dist/`) — `storage`, `alarms`, `offscreen`, `geolocation`, optional
 `notifications`, host access to `webapps.regionofwaterloo.ca` and `extensionpay.com`.
 
 Free build (`dist-free/`) — `storage`, `alarms`, `geolocation`, host access to
-`webapps.regionofwaterloo.ca`. No optional permissions.
+`webapps.regionofwaterloo.ca`.
 
-- **storage** (both): Saved stops, the route chosen at each and the display order go
+- **storage** (both): Saved stops, the route and inferred/selected destination at each, and the display order go
   in `chrome.storage.sync` so they follow the profile. The location consent flag, the
   cached position and the bookkeeping that stops one bus being announced twice go in
   `chrome.storage.local`. Which stop is currently closest goes in
@@ -107,7 +109,7 @@ Free build (`dist-free/`) — `storage`, `alarms`, `geolocation`, host access to
   that recomputes the toolbar countdown and fires due arrival alerts; that alarm is
   torn down whenever there is no Pro access or no saved stop, so it does not run for
   users it cannot serve.
-- **geolocation** (both): "Find stops near me" reads a position and lists the GRT
+- **geolocation** (both): "Find stops near me" requests a position and lists the GRT
   stops within two kilometres of it. In the paid build the same position also orders
   saved stops closest-first and decides which stop the toolbar icon counts down. It
   is read only after the rider opts in, compared against coordinates already on the

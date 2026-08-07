@@ -34,11 +34,11 @@ import {
   setNearestStopChoice,
   type StopWithDistance,
 } from "./geo";
-import { coversToday, readIndex } from "./indexStore";
+import { coversToday, isIndexFresh, readIndex } from "./indexStore";
 import { errorMessage, sendRequest } from "./messages";
 import {
   getPaymentPlans,
-  getPaymentUser,
+  getPaymentAccess,
   openLoginPage,
   openPaymentPage,
   PAYMENTS_CONFIGURED,
@@ -54,20 +54,24 @@ import {
   restoreSavedStop,
   saveSettings,
   setStopAlerts,
+  updateSavedStop,
 } from "./storage";
 import { serviceDateKey } from "./time";
 import {
+  AGENCY_TIME_ZONE,
   ALERT_LEAD_OPTIONS,
   DEFAULT_ALERT_LEAD_MINUTES,
   DIRECTION_IDS,
   DEFAULT_SETTINGS,
   EMPTY_REALTIME,
   MAX_SAVED_STOPS,
+  directionsAtStop,
   patternKey,
-  REALTIME_STALE_MS,
   type DirectionId,
   type GtfsIndex,
   type Route,
+  realtimePredictionsFresh,
+  type RealtimeSnapshot,
   type SavedStop,
   type ServiceAlert,
   type Settings,
@@ -75,12 +79,13 @@ import {
 } from "./types";
 
 const COUNTDOWN_TICK_MS = 10_000;
-const REALTIME_POLL_MS = 25_000;
+const REALTIME_POLL_MS = 45_000;
 const SEARCH_RESULT_LIMIT = 25;
 const TOAST_MS = 8_000;
 const FLASH_MS = 3_000;
 const FLASH_ERROR_MS = 5_000;
 const CARD_ANIMATION_MS = 350;
+const SCHEDULE_SLOW_MS = 10_000;
 
 /** Cards whose entry animation has finished, so re-renders don't replay it. */
 const animatedCardIds = new Set<string>();
@@ -88,6 +93,7 @@ const cardAnimationTimers = new Map<string, number>();
 
 const el = {
   root: document.documentElement,
+  topbarAddButton: query<HTMLButtonElement>("#topbar-add-button"),
   planButton: query<HTMLButtonElement>("#plan-button"),
   settingsButton: query<HTMLButtonElement>("#settings-button"),
   refreshButton: query<HTMLButtonElement>("#refresh-button"),
@@ -114,6 +120,8 @@ const el = {
   skeleton: query<HTMLElement>("#skeleton"),
   stopList: query<HTMLElement>("#stop-list"),
   emptyState: query<HTMLElement>("#empty-state"),
+  emptyTitle: query<HTMLElement>("#empty-title"),
+  emptyCopy: query<HTMLElement>("#empty-copy"),
   emptyNearButton: query<HTMLButtonElement>("#empty-near-button"),
   emptySearchButton: query<HTMLButtonElement>("#empty-search-button"),
   picker: query<HTMLElement>("#picker"),
@@ -129,7 +137,7 @@ const el = {
   searchEmpty: query<HTMLElement>("#search-empty"),
   routeSelect: query<HTMLSelectElement>("#route-select"),
   routeNearButton: query<HTMLButtonElement>("#route-near-button"),
-  directionChips: query<HTMLElement>("#direction-chips"),
+  routeSummary: query<HTMLElement>("#route-summary"),
   routeStops: query<HTMLElement>("#route-stops"),
   routeEmpty: query<HTMLElement>("#route-empty"),
   planOverlay: query<HTMLElement>("#plan-overlay"),
@@ -156,11 +164,14 @@ interface AppState {
   settings: Settings;
   lookup: RealtimeLookup;
   alerts: ServiceAlert[];
+  realtime?: RealtimeSnapshot;
   realtimeAt?: number;
   realtimeFailed: boolean;
   scheduleError?: string;
   scheduleExpired: boolean;
+  scheduleStale: boolean;
   loading: boolean;
+  scheduleSlow: boolean;
   isPro: boolean;
   paymentUnavailable: boolean;
   /**
@@ -175,13 +186,15 @@ interface AppState {
   pickerTab: PickerTab;
   searchTerm: string;
   nearbyStops?: StopWithDistance[];
+  nearbyFallback: boolean;
   locatingNearby: boolean;
   routeNearbyStops?: StopWithDistance[];
   locatingRouteNearby: boolean;
+  locationConsent: boolean;
   distancesById?: Map<string, number>;
   nearestSavedId?: string;
   selectedRouteId: string;
-  selectedDirectionId: DirectionId | "";
+  selectedDirectionId: DirectionId | "both" | "";
   alertsExpanded: boolean;
   notificationsBlocked: boolean;
   flash?: { message: string; tone: "info" | "error" };
@@ -195,7 +208,9 @@ const state: AppState = {
   alerts: [],
   realtimeFailed: false,
   scheduleExpired: false,
+  scheduleStale: false,
   loading: true,
+  scheduleSlow: false,
   isPro: false,
   paymentUnavailable: false,
   planOpen: false,
@@ -203,8 +218,10 @@ const state: AppState = {
   pickerOpen: false,
   pickerTab: "search",
   searchTerm: "",
+  nearbyFallback: false,
   locatingNearby: false,
   locatingRouteNearby: false,
+  locationConsent: false,
   selectedRouteId: "",
   selectedDirectionId: "",
   alertsExpanded: false,
@@ -231,6 +248,7 @@ function announce(message: string): void {
 }
 
 let flashTimer = 0;
+let lastAnnouncedFeedState = "";
 
 /**
  * Transient feedback for something the rider just did. It replaces the status
@@ -248,7 +266,21 @@ function flashStatus(message: string, tone: "info" | "error" = "info"): void {
   render();
 }
 
+function setFeedStateText(message: string): void {
+  el.feedStateText.textContent = message;
+  if (!message) {
+    lastAnnouncedFeedState = "";
+    return;
+  }
+  if (message === lastAnnouncedFeedState) return;
+  lastAnnouncedFeedState = message;
+  announce(message);
+}
+
 let toastTimer = 0;
+let toastDeadline = 0;
+let toastRemaining = TOAST_MS;
+let toastPaused = false;
 
 /**
  * The bottom sheet is reserved for messages that carry an action, since those
@@ -267,13 +299,33 @@ function showToast(message: string, action: { label: string; run: () => void }):
   document.body.classList.add("has-toast");
   announce(message);
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(hideToast, TOAST_MS);
+  toastRemaining = TOAST_MS;
+  toastPaused = false;
+  toastDeadline = Date.now() + toastRemaining;
+  toastTimer = window.setTimeout(hideToast, toastRemaining);
+}
+
+function pauseToast(): void {
+  if (el.toast.hidden || toastPaused) return;
+  toastRemaining = Math.max(0, toastDeadline - Date.now());
+  toastPaused = true;
+  window.clearTimeout(toastTimer);
+}
+
+function resumeToast(): void {
+  if (el.toast.hidden || !toastPaused) return;
+  toastPaused = false;
+  toastDeadline = Date.now() + toastRemaining;
+  toastTimer = window.setTimeout(hideToast, toastRemaining);
 }
 
 function hideToast(): void {
   el.toast.hidden = true;
   document.body.classList.remove("has-toast");
   window.clearTimeout(toastTimer);
+  toastDeadline = 0;
+  toastRemaining = TOAST_MS;
+  toastPaused = false;
 }
 
 function showBanner(
@@ -320,8 +372,46 @@ darkQuery.addEventListener("change", () => {
  * Data loading
  * ------------------------------------------------------------------ */
 
+let scheduleSlowTimer = 0;
+
+function watchScheduleLoad(): void {
+  window.clearTimeout(scheduleSlowTimer);
+  state.scheduleSlow = false;
+  if (!state.loading) return;
+  scheduleSlowTimer = window.setTimeout(() => {
+    scheduleSlowTimer = 0;
+    if (!state.loading) return;
+    state.scheduleSlow = true;
+    announce(
+      state.index
+        ? "The timetable refresh is taking longer than usual."
+        : "The timetable is taking longer than usual.",
+    );
+    render();
+  }, SCHEDULE_SLOW_MS);
+}
+
+function stopWatchingScheduleLoad(): void {
+  window.clearTimeout(scheduleSlowTimer);
+  scheduleSlowTimer = 0;
+  state.scheduleSlow = false;
+}
+
 async function loadSchedule(force = false): Promise<void> {
+  watchScheduleLoad();
   try {
+    // The popup normally reads this before starting the request. Reading once
+    // here as well closes a small race on a cold service worker: a cached index
+    // can become available while ENSURE_SCHEDULE is already in flight.
+    if (!state.index) {
+      const cached = await readIndex();
+      if (cached) {
+        state.index = cached;
+        state.scheduleExpired = !coversToday(cached);
+        state.scheduleStale = !isIndexFresh(cached);
+        render();
+      }
+    }
     const summary = await sendRequest({ type: "ENSURE_SCHEDULE", ...(force ? { force } : {}) });
     if (!state.index || state.index.fetchedAt !== summary.fetchedAt) {
       const fresh = await readIndex();
@@ -330,13 +420,20 @@ async function loadSchedule(force = false): Promise<void> {
     if (state.index) {
       state.scheduleError = undefined;
       state.scheduleExpired = !coversToday(state.index);
+      state.scheduleStale = summary.stale;
     }
   } catch (error) {
     if (!state.index) {
       state.scheduleError = errorMessage(error, "Could not load the GRT schedule.");
+    } else {
+      state.scheduleStale = !isIndexFresh(state.index);
     }
   } finally {
     state.loading = false;
+    stopWatchingScheduleLoad();
+    // Schedule and realtime are independent. Do not leave the initial loading
+    // label in place while a slower live-feed request keeps initialize() open.
+    render();
   }
 }
 
@@ -349,14 +446,16 @@ async function refreshRealtime(
       type: "GET_REALTIME",
       ...(options.force ? { force: true } : {}),
     });
-    state.lookup = prepareRealtime(snapshot);
+    state.realtime = snapshot;
+    state.lookup = realtimePredictionsFresh(snapshot) ? prepareRealtime(snapshot) : EMPTY_LOOKUP;
     state.alerts = snapshot.alerts;
     state.realtimeAt = snapshot.fetchedAt;
     state.realtimeFailed = false;
   } catch (error) {
     state.realtimeFailed = true;
-    // Old predictions are worse than none: fall back to the timetable.
-    if (!state.realtimeAt || Date.now() - state.realtimeAt > REALTIME_STALE_MS) {
+    // Keep a still-fresh last-known snapshot, but never let an old or frozen
+    // prediction masquerade as current data.
+    if (!state.realtime || !realtimePredictionsFresh(state.realtime)) {
       state.lookup = EMPTY_LOOKUP;
     }
     if (options.showErrors) {
@@ -375,9 +474,9 @@ async function loadPaymentStatus(): Promise<void> {
     return;
   }
   try {
-    const user = await getPaymentUser();
-    state.isPro = Boolean(user?.paid);
-    state.paymentUnavailable = false;
+    const access = await getPaymentAccess();
+    state.isPro = access.paid;
+    state.paymentUnavailable = access.unavailable;
   } catch (error) {
     console.warn("Could not check Pro status", error);
     state.paymentUnavailable = true;
@@ -408,6 +507,7 @@ async function refreshLocation(): Promise<void> {
   if (!state.index) return;
   const location = await resolveLocation();
   if (!location) {
+    state.locationConsent = await hasLocationConsent();
     state.distancesById = undefined;
     state.nearestSavedId = undefined;
     return;
@@ -448,12 +548,25 @@ function boardFor(saved: SavedStop): DepartureBoard {
     // Wide enough to find later runs of whichever route comes first.
     limit: Math.min(24, state.settings.departuresPerStop * 4),
     ...(saved.routeId ? { routeId: saved.routeId } : {}),
+    ...(saved.directionId ? { directionId: saved.directionId } : {}),
   });
+}
+
+function realtimeDetail(snapshot: RealtimeSnapshot | undefined): string {
+  if (!snapshot) return "";
+  const facts = [`Fetched ${formatFreshness(snapshot.fetchedAt)}`];
+  if (snapshot.feedTimestamp !== undefined) {
+    facts.push(`GRT data ${formatFreshness(snapshot.feedTimestamp)}`);
+  }
+  if (!snapshot.vehiclePositionsAvailable) facts.push("vehicle positions unavailable");
+  if (!snapshot.alertsAvailable) facts.push("service alerts unavailable");
+  if (!snapshot.tripUpdatesAvailable) facts.push("live predictions unavailable");
+  return facts.join(" · ");
 }
 
 function renderFeedLine(boards: DepartureBoard[]): void {
   const classes = el.feedState.classList;
-  classes.remove("is-live", "is-scheduled", "is-offline", "is-flash", "is-error");
+  classes.remove("is-live", "is-scheduled", "is-offline", "is-flash", "is-error", "is-loading");
 
   if (state.flash) {
     classes.add(state.flash.tone === "error" ? "is-error" : "is-flash");
@@ -462,38 +575,61 @@ function renderFeedLine(boards: DepartureBoard[]): void {
     return;
   }
 
-  if (state.loading && !state.index) {
-    el.feedStateText.textContent = "Loading schedule…";
-    el.feedDetail.textContent = "";
-    return;
-  }
-  if (state.realtimeFailed) {
-    classes.add("is-offline");
-    el.feedStateText.textContent = "Can't reach GRT · showing schedule";
-    el.feedState.title =
-      "Live departures could not be loaded, so these are the published schedule times.";
-    el.feedDetail.textContent = state.realtimeAt
-      ? `Last live update ${formatFreshness(state.realtimeAt)}`
-      : "";
+  if (state.loading) {
+    classes.add("is-loading");
+    setFeedStateText(
+      state.index
+        ? state.scheduleSlow
+          ? "Timetable refresh is taking longer than usual"
+          : "Refreshing timetable…"
+        : state.scheduleSlow
+          ? "Timetable is taking longer than usual"
+          : "Loading schedule…",
+    );
+    el.feedDetail.textContent = state.index ? "Using cached timetable" : "";
     return;
   }
   if (state.savedStops.length === 0) {
     // Nothing to report on yet; the empty state does the talking.
-    el.feedStateText.textContent = "";
+    setFeedStateText("");
     el.feedDetail.textContent = "";
     el.feedState.title = "";
     return;
   }
 
+  const predictionsFresh = state.realtime
+    ? realtimePredictionsFresh(state.realtime)
+    : false;
   const hasLive = boards.some((board) => board.hasLive);
-  classes.add(hasLive ? "is-live" : "is-scheduled");
-  el.feedStateText.textContent = hasLive ? "Live departures" : "Scheduled times";
-  el.feedState.title = hasLive
-    ? "Times marked Live come from the bus itself. The rest are schedule times."
-    : "GRT is not tracking buses for your stops right now, so these are the published schedule times.";
-  el.feedDetail.textContent = state.realtimeAt
-    ? `Updated ${formatFreshness(state.realtimeAt)}`
-    : "";
+  const hasPartialFeed = Boolean(state.realtime?.degraded);
+  if (hasLive && predictionsFresh) {
+    classes.add("is-live");
+    setFeedStateText(
+      state.realtimeFailed
+        ? "Last-known live departures"
+        : hasPartialFeed
+          ? "Live departures · partial feed"
+          : "Live departures",
+    );
+    el.feedState.title = hasPartialFeed
+      ? "Live predictions are current, but one or more supporting GRT realtime feeds are unavailable."
+      : "Times marked Live come from the bus itself. The rest are schedule times.";
+    el.feedDetail.textContent = realtimeDetail(state.realtime);
+    return;
+  }
+
+  classes.add(state.realtimeFailed ? "is-offline" : "is-scheduled");
+  setFeedStateText(
+    state.realtimeFailed
+      ? "Can't reach GRT · showing schedule"
+      : state.realtime?.tripUpdatesAvailable === false
+        ? "Live predictions unavailable · showing schedule"
+        : "Scheduled times",
+  );
+  el.feedState.title = state.realtimeFailed
+    ? "Live departures could not be loaded, so these are the published schedule times."
+    : "Live predictions are not current for these stops, so these are the published schedule times.";
+  el.feedDetail.textContent = realtimeDetail(state.realtime);
 }
 
 /* ------------------------------------------------------------------ *
@@ -512,6 +648,8 @@ function renderAlerts(): void {
       { ...EMPTY_REALTIME, alerts: state.alerts },
       saved.stopId,
       saved.routeId,
+      Date.now(),
+      saved.directionId,
     );
     for (const alert of alerts) relevant.set(alert.id, alert);
   }
@@ -527,10 +665,17 @@ function renderAlerts(): void {
   el.alertsToggle.setAttribute("aria-expanded", String(state.alertsExpanded));
   el.alertsList.hidden = !state.alertsExpanded;
   el.alertsList.replaceChildren(
+    element("p", {
+      className: "alert-feed-note",
+      text: state.realtime
+        ? `GRT alerts updated ${formatFreshness(state.realtime.feedTimestamp ?? state.realtime.fetchedAt)}`
+        : "GRT alert update time unavailable",
+    }),
     ...alerts.map((alert) =>
       element("div", { className: "alert-item" }, [
         element("p", { className: "alert-title", text: alert.title }),
         alert.body ? element("p", { className: "alert-body", text: alert.body }) : undefined,
+        alertPeriodNode(alert),
         alert.routeIds.length > 0
           ? element(
               "div",
@@ -545,6 +690,15 @@ function renderAlerts(): void {
                 ),
             )
           : undefined,
+        alert.url
+          ? (() => {
+              const link = element("a", { className: "alert-link", text: "More details" });
+              link.href = alert.url;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              return link;
+            })()
+          : undefined,
       ]),
     ),
   );
@@ -553,6 +707,31 @@ function renderAlerts(): void {
 function routeShortName(routeId: string): string {
   const index = state.index?.routeIndexById.get(routeId);
   return index === undefined ? routeId : (state.index?.routes[index].shortName ?? routeId);
+}
+
+const alertDateFormatter = new Intl.DateTimeFormat(undefined, {
+  timeZone: AGENCY_TIME_ZONE,
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function alertPeriodText(alert: ServiceAlert): string | undefined {
+  const start = alert.startMs === undefined ? undefined : new Date(alert.startMs);
+  const end = alert.endMs === undefined ? undefined : new Date(alert.endMs);
+  const startsLater = alert.startMs !== undefined && alert.startMs > Date.now();
+  if (start && end) {
+    return `${startsLater ? "Starts" : "Active"} ${alertDateFormatter.format(start)} – ${alertDateFormatter.format(end)}`;
+  }
+  if (start) return `${startsLater ? "Starts" : "From"} ${alertDateFormatter.format(start)}`;
+  if (end) return `Until ${alertDateFormatter.format(end)}`;
+  return undefined;
+}
+
+function alertPeriodNode(alert: ServiceAlert): HTMLElement | undefined {
+  const text = alertPeriodText(alert);
+  return text ? element("p", { className: "alert-period", text }) : undefined;
 }
 
 /* ------------------------------------------------------------------ *
@@ -650,8 +829,13 @@ function renderArrivalTimes(head: Departure, rest: readonly Departure[]): HTMLEl
     departures.map((departure, index) =>
       element("span", {
         className: `arrival-time${index === 0 ? " is-next" : ""}`,
+        ariaLabel: `${departureLabels(departure.timeMs).clock} · ${departure.isLive ? "Live" : "Scheduled"}`,
         text: departureLabels(departure.timeMs).clock,
-        dataset: { time: String(departure.timeMs) },
+        title: departure.isLive ? "Live prediction" : "Published schedule",
+        dataset: {
+          time: String(departure.timeMs),
+          source: departure.isLive ? "live" : "scheduled",
+        },
       }),
     ),
   );
@@ -833,8 +1017,11 @@ function withSeparators(parts: readonly Node[]): Node[] {
 function departureNoteNodes(
   departure: Pick<Departure, "isLive" | "delaySec" | "stopsAway">,
   labels: TimeLabels,
+  laterDepartures: readonly Pick<Departure, "isLive">[] = [],
 ): Node[] {
-  if (!departure.isLive) return [];
+  if (!departure.isLive) {
+    return [element("span", { className: "note-scheduled", text: "Scheduled" })];
+  }
   const notes: Node[] = [element("span", { className: "note-live", text: "Live" })];
   const delay = formatDelay(departure.delaySec);
   if (delay && labels.countdown !== delay) {
@@ -857,45 +1044,64 @@ function departureNoteNodes(
       }),
     );
   }
+  if (laterDepartures.some((later) => !later.isLive)) {
+    notes.push(element("span", { className: "note-scheduled", text: "later scheduled" }));
+  }
   return notes;
 }
 
-function renderDeparture(group: NextBus): HTMLElement {
+function renderDeparture(group: NextBus, options: { compact?: boolean } = {}): HTMLElement {
   const departure = group.head;
+  const compact = options.compact === true;
   const now = Date.now();
   const labels = departureLabels(
     departure.timeMs,
     departure.isLive ? departure.delaySec : undefined,
     now,
   );
-  const notes = departureNoteNodes(departure, labels);
+  const notes = departureNoteNodes(departure, labels, group.rest);
 
   return element(
     "li",
     {
-      className: "departure",
+      className: `departure${compact ? " is-compact" : ""}`,
       dataset: {
         time: String(departure.timeMs),
         delay: departure.isLive ? String(departure.delaySec) : "",
       },
     },
     [
-      routeBadge({
-        shortName: departure.routeShortName,
-        ...(departure.routeColor ? { color: departure.routeColor } : {}),
-      }),
+      compact
+        ? undefined
+        : routeBadge({
+            shortName: departure.routeShortName,
+            ...(departure.routeColor ? { color: departure.routeColor } : {}),
+          }),
       element("div", { className: "departure-copy" }, [
-        element("div", { className: "departure-summary" }, [
-          element("p", {
-            className: "headsign",
-            text: departure.headsign || `Route ${departure.routeShortName}`,
-          }),
-          element("span", {
-            className: labels.className,
-            text: labels.countdown,
-            ariaLabel: `Next bus ${labels.countdown}`,
-          }),
-        ]),
+        element(
+          "div",
+          { className: "departure-summary" },
+          compact
+            ? [
+                element("span", { className: "departure-kicker", text: "Next" }),
+                element("span", {
+                  className: labels.className,
+                  text: labels.countdown,
+                  ariaLabel: `Next departure ${labels.countdown}`,
+                }),
+              ]
+            : [
+                element("p", {
+                  className: "headsign",
+                  text: departure.headsign || `Route ${departure.routeShortName}`,
+                }),
+                element("span", {
+                  className: labels.className,
+                  text: labels.countdown,
+                  ariaLabel: `Next departure ${labels.countdown}`,
+                }),
+              ],
+        ),
         renderArrivalTimes(departure, group.rest),
         notes.length > 0
           ? element(
@@ -909,6 +1115,7 @@ function renderDeparture(group: NextBus): HTMLElement {
                     departure.stopsAway === undefined
                       ? ""
                       : String(departure.stopsAway),
+                  mixed: String(group.rest.some((later) => !later.isLive)),
                 },
               },
               withSeparators(notes),
@@ -943,6 +1150,25 @@ function describeAlerts(
 
 function renderStopTools(saved: SavedStop): HTMLElement {
   const tools = element("div", { className: "stop-tools" });
+  const menu = element("div", { className: "stop-tools-menu" });
+  menu.hidden = true;
+  const more = button(
+    "tool-button stop-more",
+    {
+      ariaLabel: `More actions for ${savedEntryLabel(saved)}`,
+      title: "More actions",
+      dataset: { focusKey: `more:${saved.id}` },
+    },
+    [icon(ICONS.more)],
+  );
+  more.setAttribute("aria-expanded", "false");
+  more.addEventListener("click", () => {
+    const open = menu.hidden;
+    menu.hidden = !open;
+    more.setAttribute("aria-expanded", String(open));
+  });
+  tools.append(more, menu);
+
   const canReorder = canReorderStop(saved);
   const entryName = savedEntryLabel(saved);
   const grip = button(
@@ -956,13 +1182,13 @@ function renderStopTools(saved: SavedStop): HTMLElement {
         : "Closest stop is ordered automatically",
       dataset: { focusKey: `grip:${saved.id}` },
     },
-    [icon(ICONS.grip, true)],
+    [icon(ICONS.grip, true), element("span", { className: "tool-label", text: "Reorder" })],
   );
   grip.disabled = !canReorder;
   grip.draggable = canReorder;
   if (canReorder) grip.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
   grip.addEventListener("keydown", (event) => onGripKeyDown(event, saved));
-  tools.append(grip);
+  menu.append(grip);
 
   if (proBuild) {
     const enabled = Boolean(saved.alertsEnabled) && proUnlocked();
@@ -988,7 +1214,7 @@ function renderStopTools(saved: SavedStop): HTMLElement {
     select.addEventListener("change", () => {
       void updateAlertLead(saved, Number(select.value));
     });
-    tools.append(select);
+    menu.append(select);
 
     const bell = button(
       "tool-button",
@@ -1000,13 +1226,16 @@ function renderStopTools(saved: SavedStop): HTMLElement {
         dataset: { focusKey: `bell:${saved.id}` },
         onClick: () => void toggleAlerts(saved),
       },
-      [icon(enabled ? ICONS.bell : ICONS.bellOff)],
+      [
+        icon(enabled ? ICONS.bell : ICONS.bellOff),
+        element("span", { className: "tool-label", text: "Alerts" }),
+      ],
     );
     bell.setAttribute("aria-pressed", String(enabled));
-    tools.append(bell);
+    menu.append(bell);
   }
 
-  tools.append(
+  menu.append(
     button(
       "tool-button tool-remove is-danger",
       {
@@ -1015,7 +1244,7 @@ function renderStopTools(saved: SavedStop): HTMLElement {
         dataset: { focusKey: `remove:${saved.id}` },
         onClick: () => void removeStop(saved),
       },
-      [icon(ICONS.close)],
+      [icon(ICONS.close), element("span", { className: "tool-label", text: "Remove" })],
     ),
   );
   return tools;
@@ -1034,7 +1263,68 @@ function savedRouteLabel(saved: SavedStop): string | undefined {
 
 function savedEntryLabel(saved: SavedStop): string {
   const route = savedRouteLabel(saved);
-  return route ? `Route ${route} at ${saved.stopName}` : saved.stopName;
+  const direction = ` · ${savedDirectionText(saved)}`;
+  return route ? `Route ${route}${direction} at ${saved.stopName}` : saved.stopName;
+}
+
+function savedDirectionText(saved: SavedStop): string {
+  if (!saved.routeId) return "All destinations";
+  if (saved.directionId) {
+    const pattern = state.index?.patterns.get(patternKey(saved.routeId, saved.directionId));
+    if (!pattern && saved.directionHeadsign) return `Toward ${saved.directionHeadsign}`;
+    return directionLabel(saved.routeId, saved.directionId);
+  }
+  const directions = directionsForStopRoute(saved.stopId, saved.routeId);
+  if (directions.length === 1) return directionLabel(saved.routeId, directions[0]);
+  return "All destinations";
+}
+
+function changeSavedDirection(saved: SavedStop, directionId?: DirectionId): Promise<void> {
+  const duplicate = state.savedStops.some(
+    (other) =>
+      other.id !== saved.id &&
+      other.stopId === saved.stopId &&
+      other.routeId === saved.routeId &&
+      other.directionId === directionId,
+  );
+  if (duplicate) {
+    flashStatus("That stop and destination are already saved.", "error");
+    render();
+    return Promise.resolve();
+  }
+  return updateSavedStop(saved.id, {
+    ...(directionId ? { directionId, directionHeadsign: directionHeadsign(saved.routeId ?? "", directionId) } : {}),
+    ...(directionId ? {} : { directionId: undefined, directionHeadsign: undefined }),
+  })
+    .then(afterStopsChanged)
+    .then(() => flashStatus(`${saved.stopName} destination updated`))
+    .catch((error) => {
+      flashStatus(errorMessage(error, "Could not update that destination."), "error");
+    });
+}
+
+function savedDirectionControl(saved: SavedStop): HTMLElement {
+  const routeId = saved.routeId;
+  if (!routeId) return element("span", { className: "saved-direction", text: "All destinations" });
+  const directions = directionsForStopRoute(saved.stopId, routeId);
+  if (directions.length <= 1) {
+    return element("span", { className: "saved-direction", text: savedDirectionText(saved) });
+  }
+  const select = element("select", {
+    className: "saved-direction",
+    ariaLabel: `Destination for ${saved.stopName}`,
+    dataset: { focusKey: `direction:${saved.id}` },
+  });
+  select.append(new Option("All destinations", ""));
+  for (const directionId of directions) {
+    select.append(new Option(directionLabel(routeId, directionId), directionId));
+  }
+  select.value = saved.directionId ?? "";
+  select.addEventListener("change", () => {
+    const value = select.value;
+    void changeSavedDirection(saved, value === "" ? undefined : (value as DirectionId));
+  });
+  return select;
 }
 
 function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
@@ -1081,7 +1371,7 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       element("span", {
         className: "meta-distance",
         text: formatDistance(distance),
-        title: formatWalkTime(distance),
+        title: `Straight-line distance; ${formatWalkTime(distance)} is an estimate`,
       }),
     );
   }
@@ -1093,6 +1383,12 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
     element("div", { className: "stop-head" }, [
       element("div", { className: "stop-identity" }, [
         element("h3", { className: "stop-name", text: saved.stopName, title: saved.stopName }),
+        route
+          ? element("div", { className: "saved-route-line" }, [
+              element("span", { text: `Route ${route}` }),
+              savedDirectionControl(saved),
+            ])
+          : undefined,
         meta,
       ]),
       renderStopTools(saved),
@@ -1106,10 +1402,10 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       {
         className: "departures",
         ariaLabel: route
-          ? `Next route ${route} bus from ${saved.stopName}`
-          : `Next bus from ${saved.stopName}`,
+          ? `Next route ${route} departure from ${saved.stopName}`
+          : `Next departure from ${saved.stopName}`,
       },
-      [renderDeparture(bus)],
+      [renderDeparture(bus, { compact: true })],
     );
     card.append(list);
   } else {
@@ -1158,9 +1454,33 @@ function stopBoards(): { saved: SavedStop; board: DepartureBoard }[] {
 }
 
 function renderStops(): DepartureBoard[] {
-  el.skeleton.hidden = !state.loading || Boolean(state.index);
+  const waitingWithoutSchedule = state.loading && !state.index;
+  const slowWithoutSchedule = waitingWithoutSchedule && state.scheduleSlow;
+  el.skeleton.hidden = !waitingWithoutSchedule;
   const hasStops = state.savedStops.length > 0;
-  el.emptyState.hidden = !state.index || hasStops;
+  const scheduleBlocked = !state.index && !state.loading;
+  el.emptyState.hidden = waitingWithoutSchedule
+    ? !slowWithoutSchedule
+    : Boolean(state.index) && hasStops;
+  if (slowWithoutSchedule) {
+    el.emptyTitle.textContent = "Timetable is taking longer than usual";
+    el.emptyCopy.textContent =
+      "GRT is still downloading the timetable. Keep this window open; if it does not finish, open Settings and reload the schedule.";
+    el.emptyNearButton.hidden = true;
+    el.emptySearchButton.hidden = true;
+  } else if (scheduleBlocked) {
+    el.emptyTitle.textContent = "Schedule unavailable";
+    el.emptyCopy.textContent =
+      "The timetable is needed to search stops. Use Retry above to download it, then add a stop.";
+    el.emptyNearButton.hidden = true;
+    el.emptySearchButton.hidden = true;
+  } else {
+    el.emptyTitle.textContent = "Save a stop to see departures";
+    el.emptyCopy.textContent =
+      "Find the stop you use most, then GRT Next Bus keeps its next departures one click away.";
+    el.emptyNearButton.hidden = false;
+    el.emptySearchButton.hidden = false;
+  }
   const entries = stopBoards();
   el.stopList.replaceChildren(
     ...entries.map(({ saved, board }) => renderStopCard(saved, board)),
@@ -1182,7 +1502,7 @@ function tickCountdowns(): void {
     );
     countdown.textContent = labels.countdown;
     countdown.className = labels.className;
-    countdown.setAttribute("aria-label", `Next bus ${labels.countdown}`);
+    countdown.setAttribute("aria-label", `Next departure ${labels.countdown}`);
 
     const note = node.querySelector<HTMLElement>(".departure-note");
     if (note?.dataset.live === "true") {
@@ -1200,6 +1520,7 @@ function tickCountdowns(): void {
               ...(stopsAway !== undefined ? { stopsAway } : {}),
             },
             labels,
+            note.dataset.mixed === "true" ? [{ isLive: false }] : [],
           ),
         ),
       );
@@ -1207,9 +1528,18 @@ function tickCountdowns(): void {
   }
   for (const node of queryAll<HTMLElement>(".arrival-time[data-time]")) {
     const timeMs = Number(node.dataset.time);
-    if (Number.isFinite(timeMs)) node.textContent = departureLabels(timeMs).clock;
+    if (Number.isFinite(timeMs)) {
+      const clock = departureLabels(timeMs).clock;
+      node.textContent = clock;
+      node.setAttribute(
+        "aria-label",
+        `${clock} · ${node.dataset.source === "live" ? "Live" : "Scheduled"}`,
+      );
+    }
   }
-  if (state.realtimeAt && !state.flash) {
+  if (state.realtime && !state.flash) {
+    el.feedDetail.textContent = realtimeDetail(state.realtime);
+  } else if (state.realtimeAt && !state.flash) {
     el.feedDetail.textContent = state.realtimeFailed
       ? `Last live update ${formatFreshness(state.realtimeAt)}`
       : `Updated ${formatFreshness(state.realtimeAt)}`;
@@ -1224,15 +1554,54 @@ function tickCountdowns(): void {
  * Rendering: stop picker
  * ------------------------------------------------------------------ */
 
-function savedStopFor(stopId: string, routeId: string): SavedStop | undefined {
+function savedStopFor(
+  stopId: string,
+  routeId: string,
+  directionId?: DirectionId,
+): SavedStop | undefined {
+  const exact = state.savedStops.find(
+    (saved) =>
+      saved.stopId === stopId &&
+      saved.routeId === routeId &&
+      saved.directionId === directionId,
+  );
+  if (exact || directionId === undefined) return exact;
+  // Older route-only entries meant "all destinations". Treat one as the same
+  // saved journey when the current feed now lets us infer the only destination
+  // from the physical stop ID, so the picker does not offer a duplicate.
   return state.savedStops.find(
-    (saved) => saved.stopId === stopId && saved.routeId === routeId,
+    (saved) =>
+      saved.stopId === stopId && saved.routeId === routeId && saved.directionId === undefined,
   );
 }
 
 function routeFor(routeId: string): Route | undefined {
   const routeIndex = state.index?.routeIndexById.get(routeId);
   return routeIndex === undefined ? undefined : state.index?.routes[routeIndex];
+}
+
+function directionsForRoute(routeId: string): DirectionId[] {
+  if (!state.index) return [];
+  return DIRECTION_IDS.filter((directionId) =>
+    state.index?.patterns.has(patternKey(routeId, directionId)),
+  );
+}
+
+function directionsForStopRoute(stopId: string, routeId: string): DirectionId[] {
+  if (!state.index) return [];
+  return directionsAtStop(state.index, stopId, routeId);
+}
+
+function directionHeadsign(routeId: string, directionId: DirectionId): string {
+  return (
+    state.index?.patterns.get(patternKey(routeId, directionId))?.headsigns.slice(0, 2).join(" / ") ??
+    `Direction ${directionId}`
+  );
+}
+
+function directionLabel(routeId: string, directionId: DirectionId): string {
+  const headsign = directionHeadsign(routeId, directionId);
+  return headsign.startsWith("Direction ") ? headsign : `Toward ${headsign}`;
 }
 
 /** Routes serving a stop, in the feed's display order. */
@@ -1243,40 +1612,22 @@ function routesAt(stop: Stop): string[] {
 interface ResultItemOptions {
   distanceMeters?: number;
   showRouteBadge?: boolean;
+  showDestination?: boolean;
+  directionId?: DirectionId;
 }
 
-/** One explicit stop + route result with a single idempotent action. */
-function resultItem(
+/** One explicit stop + route + direction action. */
+function resultRouteItem(
   stop: Stop,
   routeId: string,
   options: ResultItemOptions = {},
 ): HTMLElement {
   const route = routeFor(routeId);
   const shortName = route?.shortName ?? routeId;
-  const saved = savedStopFor(stop.id, routeId);
-  const atLimit = !saved && state.savedStops.length >= MAX_SAVED_STOPS;
-  const meta = element("div", { className: "result-meta" }, [
-    element("span", { text: `Stop ${stop.code}` }),
-    options.distanceMeters !== undefined
-      ? element("span", { text: formatDistance(options.distanceMeters) })
-      : undefined,
-  ]);
-  const add = button(`result-add${saved ? " is-added" : ""}`, {
-    text: saved ? "Added" : atLimit ? "Limit" : "Add",
-    ariaLabel: saved
-      ? `Route ${shortName} at ${stop.name} is already added`
-      : atLimit
-        ? `Saved limit reached; cannot add route ${shortName} at ${stop.name}`
-        : `Add route ${shortName} at ${stop.name}`,
-    title: saved
-      ? "This stop and route are already saved"
-      : atLimit
-        ? `You can save up to ${MAX_SAVED_STOPS} stop and route pairs`
-        : `Add route ${shortName}`,
-    dataset: { focusKey: `result-add:${stop.id}:${routeId}` },
-    ...(!saved && !atLimit ? { onClick: () => void saveStop(stop, routeId) } : {}),
-  });
-  add.disabled = Boolean(saved) || atLimit;
+  const directions = directionsForStopRoute(stop.id, routeId);
+  let selectedDirection =
+    options.directionId ?? (directions.length === 1 ? directions[0] : undefined);
+  const currentSaved = () => savedStopFor(stop.id, routeId, selectedDirection);
 
   let badge: HTMLElement | undefined;
   if (options.showRouteBadge !== false) {
@@ -1290,14 +1641,140 @@ function resultItem(
       : `Route ${shortName}`;
   }
 
+  const directionControl =
+    options.showDestination === false
+      ? undefined
+      : element("span", {
+          className: "result-direction is-static",
+          text:
+            selectedDirection !== undefined
+              ? directionLabel(routeId, selectedDirection)
+              : "All destinations",
+          ariaLabel:
+            selectedDirection !== undefined
+              ? directionLabel(routeId, selectedDirection)
+              : `All destinations for route ${shortName} at ${stop.name}`,
+        });
+
+  const add = button("result-add", {
+    dataset: {
+      focusKey: `result-add:${stop.id}:${routeId}:${selectedDirection ?? "all"}`,
+    },
+  });
+
+  function syncAddState(): void {
+    const saved = currentSaved();
+    const atLimit = !saved && state.savedStops.length >= MAX_SAVED_STOPS;
+    add.classList.toggle("is-added", Boolean(saved));
+    add.textContent = saved ? "Added" : atLimit ? "Limit" : "Add";
+    add.disabled = Boolean(saved) || atLimit;
+    add.setAttribute(
+      "aria-label",
+      saved
+        ? `${directionLabelForAction(selectedDirection, routeId)} at ${stop.name} is already added`
+        : atLimit
+          ? `Saved limit reached; cannot add route ${shortName} at ${stop.name}`
+          : `Add ${directionLabelForAction(selectedDirection, routeId)} at ${stop.name}`,
+    );
+    add.title = saved
+      ? "This stop, route, and destination are already saved"
+      : atLimit
+        ? `You can save up to ${MAX_SAVED_STOPS} stop and route pairs`
+        : `Add ${directionLabelForAction(selectedDirection, routeId)}`;
+  }
+
+  function directionLabelForAction(
+    directionId: DirectionId | undefined,
+    route: string,
+  ): string {
+    return directionId === undefined
+      ? `Route ${route} · All destinations`
+      : `Route ${route} ${directionLabel(route, directionId)}`;
+  }
+
+  add.addEventListener("click", () => {
+    void saveStop(
+      stop,
+      routeId,
+      selectedDirection,
+      selectedDirection ? directionHeadsign(routeId, selectedDirection) : undefined,
+    );
+  });
+  syncAddState();
+
+  return element("div", { className: "result-route-entry" }, [badge, directionControl, add]);
+}
+
+/**
+ * Search is stop-first: one physical stop ID normally implies one destination.
+ * When GRT uses a shared platform for both destinations, show two explicit
+ * rows instead of asking the rider to open a destination menu.
+ */
+function resultRouteItems(
+  stop: Stop,
+  routeId: string,
+  options: ResultItemOptions = {},
+): HTMLElement[] {
+  if (options.directionId !== undefined) return [resultRouteItem(stop, routeId, options)];
+  const directions = directionsForStopRoute(stop.id, routeId);
+  if (directions.length <= 1) return [resultRouteItem(stop, routeId, options)];
+  return directions.map((directionId) =>
+    resultRouteItem(stop, routeId, { ...options, directionId }),
+  );
+}
+
+/** Search groups multiple destinations under one route badge. This keeps a
+ * shared platform honest without making two directions look like duplicate
+ * route results. */
+function resultRouteGroup(
+  stop: Stop,
+  routeId: string,
+  options: ResultItemOptions = {},
+): HTMLElement {
+  const route = routeFor(routeId);
+  const shortName = route?.shortName ?? routeId;
+  const badge = routeBadge({
+    shortName,
+    ...(route?.color ? { color: route.color } : {}),
+  });
+  badge.classList.add("result-route-badge");
+  badge.title = route?.longName
+    ? `Route ${shortName} · ${route.longName}`
+    : `Route ${shortName}`;
+  const entries = resultRouteItems(stop, routeId, {
+    ...options,
+    showRouteBadge: false,
+  });
+  return element("div", { className: "result-route-group" }, [
+    badge,
+    element("div", { className: "result-route-options" }, entries),
+  ]);
+}
+
+/** One route result for the route-browser pane. */
+function resultItem(
+  stop: Stop,
+  routeId: string,
+  options: ResultItemOptions = {},
+): HTMLElement {
+  const meta = element("div", { className: "result-meta" }, [
+    element("span", { text: `Stop ${stop.code}` }),
+    options.distanceMeters !== undefined
+      ? element("span", {
+          text: formatDistance(options.distanceMeters),
+          title: "Straight-line distance; walking time is an estimate",
+        })
+      : undefined,
+  ]);
+  const actions = resultRouteItem(stop, routeId, options);
+  actions.classList.add("route-browser-actions");
   return element("li", { className: "result-row" }, [
     element("div", { className: "result-entry" }, [
-      badge,
       element("div", { className: "result-copy" }, [
         element("p", { className: "result-name", text: stop.name, title: stop.name }),
         meta,
       ]),
-      add,
+      actions,
     ]),
   ]);
 }
@@ -1306,18 +1783,84 @@ function resultItemsForStops(
   entries: readonly { stop: Stop; distanceMeters?: number }[],
   limit = SEARCH_RESULT_LIMIT,
 ): HTMLElement[] {
-  const items: HTMLElement[] = [];
+  const grouped = new Map<string, { name: string; entries: { stop: Stop; distanceMeters?: number }[] }>();
+  let locationCount = 0;
   for (const entry of entries) {
-    for (const routeId of routesAt(entry.stop)) {
-      items.push(
-        resultItem(entry.stop, routeId, {
-          ...(entry.distanceMeters !== undefined
-            ? { distanceMeters: entry.distanceMeters }
-            : {}),
-        }),
+    if (locationCount >= limit || routesAt(entry.stop).length === 0) break;
+    const key = entry.stop.name;
+    const group = grouped.get(key) ?? { name: entry.stop.name, entries: [] };
+    group.entries.push(entry);
+    grouped.set(key, group);
+    locationCount += 1;
+  }
+
+  const items: HTMLElement[] = [];
+  for (const group of grouped.values()) {
+    const locations = element("div", { className: "result-location-list" });
+    for (const entry of group.entries) {
+      const mapLink =
+        entry.distanceMeters === undefined
+          ? undefined
+          : (() => {
+              const link = element("a", {
+                className: "result-map-link",
+                text: "Map",
+                ariaLabel: `Open ${entry.stop.name}, stop ${entry.stop.code}, in Google Maps`,
+              }) as HTMLAnchorElement;
+              link.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                `${entry.stop.lat},${entry.stop.lon}`,
+              )}`;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              return link;
+            })();
+      const locationMeta = element("div", { className: "result-meta" }, [
+        entry.distanceMeters !== undefined
+          ? element("span", {
+              text: formatDistance(entry.distanceMeters),
+              title: "Straight-line distance; walking time is an estimate",
+            })
+          : undefined,
+        mapLink,
+      ]);
+      const routes = routesAt(entry.stop);
+      locations.append(
+        element("div", { className: "result-stop-location" }, [
+          element("div", { className: "result-location-heading" }, [
+            element("span", {
+              className: "result-stop-code",
+              text: `Stop ${entry.stop.code}`,
+            }),
+            locationMeta,
+          ]),
+          element(
+            "div",
+            { className: "result-route-list" },
+            routes.map((routeId) =>
+              resultRouteGroup(entry.stop, routeId, {
+                ...(entry.distanceMeters !== undefined
+                  ? { distanceMeters: entry.distanceMeters }
+                  : {}),
+              }),
+            ),
+          ),
+        ]),
       );
-      if (items.length >= limit) return items;
     }
+    items.push(
+      element("li", { className: "result-name-group" }, [
+        element("div", { className: "result-name-heading" }, [
+          element("p", { className: "result-name", text: group.name, title: group.name }),
+          group.entries.length > 1
+            ? element("span", {
+                className: "result-name-count",
+                text: `${group.entries.length} stop locations`,
+              })
+            : undefined,
+        ]),
+        locations,
+      ]),
+    );
   }
   return items;
 }
@@ -1346,10 +1889,21 @@ function searchStops(term: string): Stop[] {
 function renderSearchPane(): void {
   el.searchResults.replaceChildren();
   el.searchEmpty.hidden = true;
+  el.stopSearch.disabled = !state.index;
+  el.nearButton.disabled = !state.index || state.locatingNearby;
 
   if (state.locatingNearby) {
     el.searchEmpty.hidden = false;
     el.searchEmpty.textContent = "Finding stops near you…";
+    return;
+  }
+  if (!state.index) {
+    el.searchEmpty.hidden = false;
+    el.searchEmpty.textContent = state.loading
+      ? state.scheduleSlow
+        ? "The timetable is taking longer than usual. Search will be available when it finishes."
+        : "Downloading the timetable…"
+      : "Schedule unavailable — retry the download above to search stops.";
     return;
   }
   if (state.searchTerm.trim().length >= 2) {
@@ -1382,11 +1936,30 @@ function renderSearchPane(): void {
         })),
       ),
     );
+    if (state.nearbyFallback) {
+      el.searchEmpty.hidden = false;
+      el.searchEmpty.textContent = "No stops were within 2 km; showing the nearest stop instead.";
+    }
   }
 }
 
 function renderRoutePane(): void {
-  if (!state.index) return;
+  el.routeSummary.hidden = true;
+  el.routeSummary.textContent = "";
+  if (!state.index) {
+    el.routeSelect.replaceChildren(
+      new Option(state.loading ? "Downloading timetable…" : "Schedule unavailable", ""),
+    );
+    el.routeSelect.disabled = true;
+    el.routeNearButton.disabled = true;
+    el.routeStops.replaceChildren();
+    el.routeEmpty.hidden = false;
+    el.routeEmpty.textContent = state.loading
+      ? "Routes will appear when the timetable finishes loading."
+      : "Reload the timetable from Settings to browse routes.";
+    return;
+  }
+  el.routeSelect.disabled = false;
   if (el.routeSelect.options.length <= 1) {
     el.routeSelect.replaceChildren(new Option("Choose a route", ""));
     for (const route of state.index.routes) {
@@ -1399,29 +1972,13 @@ function renderRoutePane(): void {
   const directions = DIRECTION_IDS.filter((directionId) =>
     state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
   );
-  if (!directions.includes(state.selectedDirectionId as DirectionId)) {
+  if (directions.length <= 1) {
     state.selectedDirectionId = directions[0] ?? "";
-  }
-
-  el.directionChips.hidden = directions.length <= 1;
-  el.directionChips.replaceChildren();
-  for (const directionId of directions) {
-    const pattern = state.index.patterns.get(
-      patternKey(state.selectedRouteId, directionId),
-    );
-    const headsign = pattern?.headsigns.slice(0, 2).join(" / ");
-    const label = headsign ? `To ${headsign}` : `Direction ${directionId}`;
-    const chip = button("chip", {
-      text: label,
-      title: label,
-      onClick: () => {
-        state.selectedDirectionId = directionId;
-        render();
-      },
-    });
-    chip.setAttribute("role", "radio");
-    chip.setAttribute("aria-checked", String(state.selectedDirectionId === directionId));
-    el.directionChips.append(chip);
+  } else if (
+    state.selectedDirectionId !== "both" &&
+    !directions.includes(state.selectedDirectionId as DirectionId)
+  ) {
+    state.selectedDirectionId = "both";
   }
 
   const filteringNearby = state.routeNearbyStops !== undefined;
@@ -1435,17 +1992,24 @@ function renderRoutePane(): void {
 
   el.routeStops.replaceChildren();
   el.routeEmpty.hidden = true;
-  if (!state.selectedRouteId || !state.selectedDirectionId) return;
+  if (!state.selectedRouteId || directions.length === 0) return;
   if (state.locatingRouteNearby) {
     el.routeEmpty.hidden = false;
     el.routeEmpty.textContent = "Finding this route near you…";
     return;
   }
 
-  const pattern = state.index.patterns.get(
-    patternKey(state.selectedRouteId, state.selectedDirectionId),
-  );
-  const stopIds = [...new Set(pattern?.stopIds ?? [])];
+  // A physical stop already identifies the side of the road in the GRT feed.
+  // Browse the whole route and let the stop pattern provide the destination;
+  // a destination choice here would only repeat that decision globally.
+  const selectedDirections = directions;
+  const stopIds = [
+    ...new Set(
+      selectedDirections.flatMap(
+        (directionId) => state.index?.patterns.get(patternKey(state.selectedRouteId, directionId))?.stopIds ?? [],
+      ),
+    ),
+  ];
   const stopsById = new Map(state.index.stops.map((stop) => [stop.id, stop]));
   const nearbyByStop = new Map(
     (state.routeNearbyStops ?? []).map((entry) => [entry.stop.id, entry.meters]),
@@ -1463,31 +2027,61 @@ function renderRoutePane(): void {
     const stop = stopsById.get(stopId);
     if (!stop) return [];
     const distanceMeters = nearbyByStop.get(stopId);
-    return [
+    const stopDirections = selectedDirections.filter((directionId) =>
+      state.index?.patterns
+        .get(patternKey(state.selectedRouteId, directionId))
+        ?.stopIds.includes(stopId),
+    );
+    return stopDirections.map((directionId) =>
       resultItem(stop, state.selectedRouteId, {
         showRouteBadge: false,
+        showDestination: stopDirections.length > 1,
+        directionId,
         ...(distanceMeters !== undefined ? { distanceMeters } : {}),
       }),
-    ];
+    );
   });
   if (items.length === 0) {
     el.routeEmpty.hidden = false;
     el.routeEmpty.textContent = filteringNearby
-      ? "No stops for this route and direction are within 2 km."
-      : "No stops found for this route and direction.";
+      ? "No stops for this route and destination filter are within 2 km."
+      : "No stops found for this route and destination filter.";
     return;
   }
+  const stopCountLabel = `${visibleStopIds.length} ${visibleStopIds.length === 1 ? "stop" : "stops"}`;
+  el.routeSummary.textContent = `${stopCountLabel}${filteringNearby ? " · nearest first" : ""}`;
+  el.routeSummary.hidden = false;
   el.routeStops.append(...items);
 }
 
 function renderPicker(): void {
   const atLimit = state.savedStops.length >= MAX_SAVED_STOPS;
+  el.picker.classList.toggle("is-open", state.pickerOpen);
+  el.topbarAddButton.textContent = state.pickerOpen ? "Close" : "Add stop";
+  el.topbarAddButton.disabled =
+    (!state.index && !state.pickerOpen) || (atLimit && !state.pickerOpen);
+  el.topbarAddButton.title = state.pickerOpen
+    ? "Close stop picker"
+    : state.loading && !state.index
+      ? "The timetable is still loading"
+      : "Add a stop";
+  el.topbarAddButton.setAttribute("aria-expanded", String(state.pickerOpen));
+  el.topbarAddButton.setAttribute(
+    "aria-label",
+    state.pickerOpen ? "Close stop picker" : "Add a stop",
+  );
   el.pickerToggle.setAttribute("aria-expanded", String(state.pickerOpen));
   el.pickerBody.hidden = !state.pickerOpen;
-  el.pickerToggle.querySelector(".picker-toggle-label")!.textContent = atLimit
-    ? `Saved limit reached (${MAX_SAVED_STOPS})`
-    : "Add a stop";
-  el.pickerToggle.disabled = atLimit && !state.pickerOpen;
+  el.tabRoute.disabled = !state.index;
+  el.pickerToggle.querySelector(".picker-toggle-label")!.textContent = !state.index
+    ? state.loading
+      ? "Loading timetable…"
+      : "Schedule unavailable"
+    : atLimit
+      ? `Saved limit reached (${MAX_SAVED_STOPS})`
+      : "Add a stop";
+  el.pickerToggle.disabled =
+    (!state.index && !state.pickerOpen) || (atLimit && !state.pickerOpen);
   if (!state.pickerOpen) return;
 
   const searching = state.pickerTab === "search";
@@ -1515,19 +2109,24 @@ function renderSettings(): void {
       "aria-checked",
       String(node.dataset.themeValue === state.settings.theme),
     );
+    node.tabIndex = node.getAttribute("aria-checked") === "true" ? 0 : -1;
   }
   for (const node of queryAll<HTMLButtonElement>("#count-group [data-count-value]")) {
     node.setAttribute(
       "aria-checked",
       String(Number(node.dataset.countValue) === state.settings.departuresPerStop),
     );
+    node.tabIndex = node.getAttribute("aria-checked") === "true" ? 0 : -1;
   }
 
   el.nearestField.hidden = !proBuild;
-  el.nearestToggle.checked = state.settings.nearestFirst && proUnlocked();
-  el.nearestHint.textContent = proUnlocked()
-    ? "Uses your location on this device only."
-    : "Included with Pro. Your location never leaves this device.";
+  el.nearestToggle.checked =
+    state.settings.nearestFirst && proUnlocked() && state.locationConsent;
+  el.nearestHint.textContent = !proUnlocked()
+    ? "Included with Pro. Your location never leaves this device."
+    : state.locationConsent
+      ? "Uses your location on this device only."
+      : "Off until you allow location access on this device.";
   el.testAlertButton.hidden = !proUnlocked();
   el.managePlanButton.hidden = !proUnlocked();
 
@@ -1535,11 +2134,23 @@ function renderSettings(): void {
   if (state.index) {
     const first = state.index.serviceDates[0];
     const last = state.index.serviceDates[state.index.serviceDates.length - 1];
-    notes.push(`Timetable updated ${formatFreshness(state.index.fetchedAt)}`);
+    const updateLabel = state.loading
+      ? state.scheduleSlow
+        ? "Timetable refresh is taking longer than usual · cached copy updated"
+        : "Refreshing timetable · cached copy updated"
+      : "Timetable updated";
+    notes.push(`${updateLabel} ${formatFreshness(state.index.fetchedAt)}`);
+    if (state.scheduleStale) notes.push("cached copy is older than usual");
     if (first && last) {
       notes.push(`covers ${prettyDate(first)} – ${prettyDate(last)}`);
     }
     notes.push(`${state.index.stops.length} stops`);
+  } else if (state.loading) {
+    notes.push(
+      state.scheduleSlow
+        ? "Timetable is taking longer than usual"
+        : "Downloading timetable…",
+    );
   }
   el.settingsNote.textContent = notes.join(" · ");
 }
@@ -1666,7 +2277,7 @@ function menuIsOpen(): boolean {
  *
  * Those used to rebuild the stop list and the picker underneath an open menu,
  * which shut it the instant it was opened — a route menu only has to be up for a
- * second to be caught by a poll that runs every twenty-five. Background
+ * second to be caught by a poll that runs every forty-five seconds. Background
  * refreshes now leave both regions alone while a menu is open. Nothing goes
  * stale: the countdowns are updated in place on their own timer, the status line
  * still refreshes, and the next thing the rider does rebuilds the rest.
@@ -1687,8 +2298,20 @@ function render(options: { background?: boolean } = {}): void {
     showBanner(state.scheduleError, {
       action: { label: "Retry", run: () => void reloadSchedule() },
     });
+  } else if (state.loading && state.scheduleSlow) {
+    showBanner(
+      state.index
+        ? "The timetable refresh is taking longer than usual. Cached departures remain available."
+        : "The timetable is taking longer than usual. Keep this window open while GRT data downloads.",
+      { tone: "info" },
+    );
   } else if (state.scheduleExpired) {
     showBanner("This timetable does not cover today.", {
+      tone: "info",
+      action: { label: "Reload", run: () => void reloadSchedule() },
+    });
+  } else if (state.scheduleStale && state.index) {
+    showBanner(`Using a cached timetable updated ${formatFreshness(state.index.fetchedAt)}.`, {
       tone: "info",
       action: { label: "Reload", run: () => void reloadSchedule() },
     });
@@ -1702,6 +2325,11 @@ function render(options: { background?: boolean } = {}): void {
   }
 
   restoreFocus(focusKey);
+}
+
+function focusPickerStart(): void {
+  if (!state.pickerOpen) return;
+  (state.pickerTab === "search" ? el.stopSearch : el.routeSelect).focus();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1718,10 +2346,15 @@ async function afterStopsChanged(stops: SavedStop[]): Promise<void> {
   }
 }
 
-/** Saves one explicit stop + route pair and leaves the picker open for more. */
-async function saveStop(stop: Stop, routeId: string): Promise<void> {
+/** Saves one explicit stop + route + direction and leaves the picker open. */
+async function saveStop(
+  stop: Stop,
+  routeId: string,
+  directionId?: DirectionId,
+  directionHeadsignValue?: string,
+): Promise<void> {
   const shortName = routeFor(routeId)?.shortName ?? routeId;
-  if (savedStopFor(stop.id, routeId)) {
+  if (savedStopFor(stop.id, routeId, directionId)) {
     flashStatus(`Already added · route ${shortName} at ${stop.name}`);
     return;
   }
@@ -1732,6 +2365,8 @@ async function saveStop(stop: Stop, routeId: string): Promise<void> {
       stopName: stop.name,
       routeId,
       routeShortName: shortName,
+      ...(directionId ? { directionId } : {}),
+      ...(directionHeadsignValue ? { directionHeadsign: directionHeadsignValue } : {}),
     });
     await afterStopsChanged(stops);
     flashStatus(`Saved · route ${shortName} at ${stop.name}`);
@@ -1741,53 +2376,68 @@ async function saveStop(stop: Stop, routeId: string): Promise<void> {
 }
 
 async function removeStop(saved: SavedStop): Promise<void> {
-  const stops = await removeSavedStop(saved.id);
-  await afterStopsChanged(stops);
-  showToast(`${savedEntryLabel(saved)} removed`, {
-    label: "Undo",
-    run: () => {
-      void restoreSavedStop(saved).then(afterStopsChanged);
-    },
-  });
+  try {
+    const stops = await removeSavedStop(saved.id);
+    await afterStopsChanged(stops);
+    showToast(`${savedEntryLabel(saved)} removed`, {
+      label: "Undo",
+      run: () => {
+        void restoreSavedStop(saved)
+          .then(afterStopsChanged)
+          .catch((error) => flashStatus(errorMessage(error, "Could not restore that stop."), "error"));
+      },
+    });
+    el.toastAction.focus();
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not remove that stop."), "error");
+  }
 }
 
 async function toggleAlerts(saved: SavedStop): Promise<void> {
-  if (!proUnlocked()) {
-    openPlan();
-    return;
-  }
-  const enabling = !saved.alertsEnabled;
-  if (enabling) {
-    // Must be requested straight from the click to keep the user gesture.
-    const granted = await chrome.permissions.request({ permissions: ["notifications"] });
-    if (!granted) {
-      flashStatus("Arrival alerts need Chrome's notification permission.", "error");
+  try {
+    if (!proUnlocked()) {
+      openPlan();
       return;
     }
-    const status = await sendRequest({ type: "NOTIFICATION_STATUS" }).catch(() => undefined);
-    state.notificationsBlocked = Boolean(status && !status.systemEnabled);
-  } else if (
-    // Only stop warning once no stop is waiting on notifications.
-    !state.savedStops.some((stop) => stop.id !== saved.id && stop.alertsEnabled)
-  ) {
-    state.notificationsBlocked = false;
-  }
+    const enabling = !saved.alertsEnabled;
+    if (enabling) {
+      // Must be requested straight from the click to keep the user gesture.
+      const granted = await chrome.permissions.request({ permissions: ["notifications"] });
+      if (!granted) {
+        flashStatus("Arrival alerts need Chrome's notification permission.", "error");
+        return;
+      }
+      const status = await sendRequest({ type: "NOTIFICATION_STATUS" }).catch(() => undefined);
+      state.notificationsBlocked = Boolean(status && !status.systemEnabled);
+    } else if (
+      // Only stop warning once no stop is waiting on notifications.
+      !state.savedStops.some((stop) => stop.id !== saved.id && stop.alertsEnabled)
+    ) {
+      state.notificationsBlocked = false;
+    }
 
-  const leadMinutes = alertLeadFor(saved);
-  const stops = await setStopAlerts(saved.id, enabling, leadMinutes);
-  await afterStopsChanged(stops);
-  flashStatus(describeAlerts(savedEntryLabel(saved), enabling, leadMinutes).confirmation);
+    const leadMinutes = alertLeadFor(saved);
+    const stops = await setStopAlerts(saved.id, enabling, leadMinutes);
+    await afterStopsChanged(stops);
+    flashStatus(describeAlerts(savedEntryLabel(saved), enabling, leadMinutes).confirmation);
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not update arrival alerts."), "error");
+  }
 }
 
 /** Changing the lead time confirms itself the same way toggling does. */
 async function updateAlertLead(saved: SavedStop, leadMinutes: number): Promise<void> {
-  if (!proUnlocked()) return;
-  // Editing the lead time never changes whether alerts are on, so the
-  // confirmation reports the same state the card shows.
-  const enabled = Boolean(saved.alertsEnabled);
-  const stops = await setStopAlerts(saved.id, enabled, leadMinutes);
-  await afterStopsChanged(stops);
-  flashStatus(describeAlerts(savedEntryLabel(saved), enabled, leadMinutes).confirmation);
+  try {
+    if (!proUnlocked()) return;
+    // Editing the lead time never changes whether alerts are on, so the
+    // confirmation reports the same state the card shows.
+    const enabled = Boolean(saved.alertsEnabled);
+    const stops = await setStopAlerts(saved.id, enabled, leadMinutes);
+    await afterStopsChanged(stops);
+    flashStatus(describeAlerts(savedEntryLabel(saved), enabled, leadMinutes).confirmation);
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not update the alert lead time."), "error");
+  }
 }
 
 async function reloadSchedule(): Promise<void> {
@@ -1819,6 +2469,7 @@ function scrollPickerIntoView(): void {
 async function readNearbyPosition(): Promise<GeolocationPosition> {
   const position = await getCurrentPosition();
   await setLocationConsent(true);
+  state.locationConsent = true;
   // Accuracy travels with the position: without it a kilometre-wide fix would
   // later be treated as pinpoint when picking the closest saved entry.
   await saveLastLocation(
@@ -1831,24 +2482,38 @@ async function readNearbyPosition(): Promise<GeolocationPosition> {
 
 async function findNearbyStops(): Promise<void> {
   state.pickerOpen = true;
+  state.settingsOpen = false;
   state.pickerTab = "search";
   state.locatingNearby = true;
+  state.nearbyFallback = false;
   state.searchTerm = "";
   el.stopSearch.value = "";
   render();
   scrollPickerIntoView();
   try {
     const position = await readNearbyPosition();
-    state.nearbyStops = state.index
+    const withinRadius = state.index
       ? nearestStops(
           state.index.stops,
           position.coords.latitude,
           position.coords.longitude,
         )
       : [];
+    state.nearbyFallback = withinRadius.length === 0;
+    state.nearbyStops =
+      withinRadius.length > 0 || !state.index
+        ? withinRadius
+        : nearestStops(
+            state.index.stops,
+            position.coords.latitude,
+            position.coords.longitude,
+            1,
+            Number.POSITIVE_INFINITY,
+          );
     await refreshLocation();
   } catch (error) {
     state.nearbyStops = undefined;
+    state.nearbyFallback = false;
     flashStatus(
       isLocationDenied(error)
         ? "Location access was declined."
@@ -1899,39 +2564,46 @@ async function toggleNearestFirst(enabled: boolean): Promise<void> {
     openPlan();
     return;
   }
-  if (enabled) {
-    // Reading a position can take a few seconds; keep the control honest.
-    el.nearestToggle.disabled = true;
-    flashStatus("Checking your location…");
-    try {
-      const position = await getCurrentPosition();
-      await setLocationConsent(true);
-      await saveLastLocation(
-        position.coords.latitude,
-        position.coords.longitude,
-        position.coords.accuracy,
-      );
-    } catch (error) {
-      el.nearestToggle.checked = false;
-      flashStatus(
-        isLocationDenied(error)
-          ? "Location access was declined."
-          : errorMessage(error, "Could not read your location."),
-        "error",
-      );
-      return;
-    } finally {
-      el.nearestToggle.disabled = false;
+  try {
+    if (enabled) {
+      // Reading a position can take a few seconds; keep the control honest.
+      el.nearestToggle.disabled = true;
+      flashStatus("Checking your location…");
+      try {
+        const position = await getCurrentPosition();
+        await setLocationConsent(true);
+        state.locationConsent = true;
+        await saveLastLocation(
+          position.coords.latitude,
+          position.coords.longitude,
+          position.coords.accuracy,
+        );
+      } catch (error) {
+        el.nearestToggle.checked = false;
+        flashStatus(
+          isLocationDenied(error)
+            ? "Location access was declined."
+            : errorMessage(error, "Could not read your location."),
+          "error",
+        );
+        return;
+      } finally {
+        el.nearestToggle.disabled = false;
+      }
+    } else {
+      await setLocationConsent(false);
+      state.locationConsent = false;
+      state.nearestSavedId = undefined;
+      state.distancesById = undefined;
     }
-  } else {
-    await setLocationConsent(false);
-    state.nearestSavedId = undefined;
-    state.distancesById = undefined;
+    state.settings = await saveSettings({ nearestFirst: enabled });
+    if (enabled) await refreshLocation();
+    flashStatus(enabled ? "Closest stop first is on" : "Closest stop first is off");
+    void sendRequest({ type: "LOCATION_CHANGED" }).catch(() => undefined);
+  } catch (error) {
+    flashStatus(errorMessage(error, "Could not save the closest-stop setting."), "error");
+    render();
   }
-  state.settings = await saveSettings({ nearestFirst: enabled });
-  if (enabled) await refreshLocation();
-  flashStatus(enabled ? "Closest stop first is on" : "Closest stop first is off");
-  void sendRequest({ type: "LOCATION_CHANGED" }).catch(() => undefined);
 }
 
 function openPlan(): void {
@@ -1987,6 +2659,38 @@ async function restorePurchase(): Promise<void> {
  * Events
  * ------------------------------------------------------------------ */
 
+function onRadioGroupKeyDown(event: KeyboardEvent): void {
+  if (
+    event.key !== "ArrowLeft" &&
+    event.key !== "ArrowRight" &&
+    event.key !== "ArrowUp" &&
+    event.key !== "ArrowDown" &&
+    event.key !== "Home" &&
+    event.key !== "End"
+  ) {
+    return;
+  }
+  const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="radio"]');
+  if (!target) return;
+  const radios = queryAll<HTMLButtonElement>('[role="radiogroup"] [role="radio"]')
+    .filter((radio) => radio.parentElement === target.parentElement);
+  const current = radios.indexOf(target);
+  if (current < 0) return;
+  event.preventDefault();
+  const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+  const next = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? radios.length - 1
+      : (current + (event.key === (horizontal ? "ArrowRight" : "ArrowDown") ? 1 : -1) + radios.length) % radios.length;
+  radios[next]?.click();
+  radios[next]?.focus();
+}
+
+for (const group of [el.themeGroup, el.countGroup]) {
+  group.addEventListener("keydown", onRadioGroupKeyDown);
+}
+
 el.refreshButton.addEventListener("click", () => {
   announce("Refreshing departures.");
   void refreshRealtime({ showErrors: true, force: true });
@@ -1994,13 +2698,23 @@ el.refreshButton.addEventListener("click", () => {
 
 el.settingsButton.addEventListener("click", () => {
   state.settingsOpen = !state.settingsOpen;
-  if (state.settingsOpen) state.planOpen = false;
+  if (state.settingsOpen) {
+    state.planOpen = false;
+    state.pickerOpen = false;
+  }
   render();
 });
 
 el.planButton.addEventListener("click", () => {
   if (state.planOpen) closePlan();
   else openPlan();
+});
+
+el.topbarAddButton.addEventListener("click", () => {
+  state.pickerOpen = !state.pickerOpen;
+  if (state.pickerOpen) state.settingsOpen = false;
+  render();
+  focusPickerStart();
 });
 
 el.planClose.addEventListener("click", closePlan);
@@ -2018,8 +2732,9 @@ el.alertsToggle.addEventListener("click", () => {
 
 el.pickerToggle.addEventListener("click", () => {
   state.pickerOpen = !state.pickerOpen;
+  if (state.pickerOpen) state.settingsOpen = false;
   render();
-  if (state.pickerOpen) el.stopSearch.focus();
+  focusPickerStart();
 });
 
 el.tabSearch.addEventListener("click", () => {
@@ -2048,16 +2763,15 @@ el.emptyNearButton.addEventListener("click", () => void findNearbyStops());
 el.emptySearchButton.addEventListener("click", () => {
   state.pickerOpen = true;
   state.pickerTab = "search";
+  state.settingsOpen = false;
   render();
   el.stopSearch.focus();
 });
 
 el.routeSelect.addEventListener("change", () => {
   state.selectedRouteId = el.routeSelect.value;
-  state.selectedDirectionId =
-    DIRECTION_IDS.find((directionId) =>
-      state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
-    ) ?? "";
+  const directions = directionsForRoute(state.selectedRouteId);
+  state.selectedDirectionId = directions.length > 1 ? "both" : directions[0] ?? "";
   render();
 });
 
@@ -2074,21 +2788,25 @@ el.themeGroup.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLElement>("[data-theme-value]");
   const value = target?.dataset.themeValue;
   if (value !== "auto" && value !== "light" && value !== "dark") return;
-  void saveSettings({ theme: value }).then((settings) => {
-    state.settings = settings;
-    applyTheme();
-    render();
-  });
+  void saveSettings({ theme: value })
+    .then((settings) => {
+      state.settings = settings;
+      applyTheme();
+      render();
+    })
+    .catch((error) => flashStatus(errorMessage(error, "Could not save the appearance setting."), "error"));
 });
 
 el.countGroup.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLElement>("[data-count-value]");
   const value = Number(target?.dataset.countValue);
   if (!Number.isFinite(value)) return;
-  void saveSettings({ departuresPerStop: value }).then((settings) => {
-    state.settings = settings;
-    render();
-  });
+  void saveSettings({ departuresPerStop: value })
+    .then((settings) => {
+      state.settings = settings;
+      render();
+    })
+    .catch((error) => flashStatus(errorMessage(error, "Could not save the departure count."), "error"));
 });
 
 el.nearestToggle.addEventListener("change", () => {
@@ -2127,6 +2845,13 @@ el.managePlanButton.addEventListener("click", () => {
 });
 
 el.toastClose.addEventListener("click", hideToast);
+el.toast.addEventListener("mouseenter", pauseToast);
+el.toast.addEventListener("mouseleave", resumeToast);
+el.toast.addEventListener("focusin", pauseToast);
+el.toast.addEventListener("focusout", (event) => {
+  if (event.relatedTarget instanceof Node && el.toast.contains(event.relatedTarget)) return;
+  resumeToast();
+});
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
@@ -2136,6 +2861,13 @@ document.addEventListener("keydown", (event) => {
     }
     if (state.planOpen) {
       closePlan();
+      return;
+    }
+    if (state.pickerOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.pickerOpen = false;
+      render();
       return;
     }
     if (state.settingsOpen) {
@@ -2185,12 +2917,16 @@ for (const tab of [el.tabSearch, el.tabRoute]) {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   void (async () => {
-    if (changes.savedStops) state.savedStops = await getSavedStops();
-    if (changes.settings) {
-      state.settings = await getSettings();
-      applyTheme();
+    try {
+      if (changes.savedStops) state.savedStops = await getSavedStops();
+      if (changes.settings) {
+        state.settings = await getSettings();
+        applyTheme();
+      }
+      render({ background: true });
+    } catch (error) {
+      flashStatus(errorMessage(error, "Could not refresh saved settings."), "error");
     }
-    render({ background: true });
   })();
 });
 
@@ -2202,6 +2938,7 @@ async function initialize(): Promise<void> {
   const [settings, savedStops] = await Promise.all([getSettings(), getSavedStops()]);
   state.settings = settings;
   state.savedStops = savedStops;
+  state.locationConsent = await hasLocationConsent();
   applyTheme();
   render();
 
@@ -2210,6 +2947,7 @@ async function initialize(): Promise<void> {
   if (cached) {
     state.index = cached;
     state.scheduleExpired = !coversToday(cached);
+    state.scheduleStale = !isIndexFresh(cached);
     state.loading = false;
     render();
   }

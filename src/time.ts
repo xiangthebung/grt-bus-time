@@ -62,29 +62,74 @@ function dateKeyOf(parts: ZonedParts): string {
   );
 }
 
-/** Resolves the agency-local calendar day and its midnight for an instant. */
-export function serviceDayAt(timestamp: number): ServiceDay {
-  const parts = zonedParts(timestamp);
-  const subSecond = ((timestamp % 1000) + 1000) % 1000;
-  const millisecondsIntoDay =
-    (parts.hour * 3600 + parts.minute * 60 + parts.second) * 1000 + subSecond;
+function datePartsFromKey(dateKey: string): { year: number; month: number; day: number } {
   return {
-    dateKey: dateKeyOf(parts),
-    midnightMs: timestamp - millisecondsIntoDay,
+    year: Number(dateKey.slice(0, 4)),
+    month: Number(dateKey.slice(4, 6)),
+    day: Number(dateKey.slice(6, 8)),
   };
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * Finds the epoch for local midnight without assuming that a local day is
+ * exactly 24 elapsed hours. The old implementation subtracted the displayed
+ * wall-clock time from the instant; on a DST transition day that subtracts an
+ * hour too much or too little after the offset change.
+ */
+function zonedMidnightMs(parts: Pick<ZonedParts, "year" | "month" | "day">): number {
+  const wantedWallMs = Date.UTC(parts.year, parts.month - 1, parts.day);
+  let candidate = wantedWallMs;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const actual = zonedParts(candidate);
+    const actualWallMs = Date.UTC(
+      actual.year,
+      actual.month - 1,
+      actual.day,
+      actual.hour,
+      actual.minute,
+      actual.second,
+    );
+    const corrected = candidate + (wantedWallMs - actualWallMs);
+    if (corrected === candidate) return candidate;
+    candidate = corrected;
+  }
+  return candidate;
+}
+
+function serviceDayForDateKey(dateKey: string): ServiceDay {
+  const parts = datePartsFromKey(dateKey);
+  return { dateKey, midnightMs: zonedMidnightMs(parts) };
+}
+
+function shiftDateKey(dateKey: string, days: number): string {
+  const { year, month, day } = datePartsFromKey(dateKey);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return (
+    `${shifted.getUTCFullYear()}` +
+    `${String(shifted.getUTCMonth() + 1).padStart(2, "0")}` +
+    `${String(shifted.getUTCDate()).padStart(2, "0")}`
+  );
+}
+
+/** Resolves the agency-local calendar day and its midnight for an instant. */
+export function serviceDayAt(timestamp: number): ServiceDay {
+  const parts = zonedParts(timestamp);
+  return {
+    dateKey: dateKeyOf(parts),
+    midnightMs: zonedMidnightMs(parts),
+  };
+}
 
 /**
  * Service days that can contribute departures right now: yesterday (for trips
  * that run past midnight), today, and tomorrow (for a late-evening lookahead).
  */
 export function relevantServiceDays(now: number): ServiceDay[] {
+  const today = serviceDayAt(now);
   return [
-    serviceDayAt(now - DAY_MS),
-    serviceDayAt(now),
-    serviceDayAt(now + DAY_MS),
+    serviceDayForDateKey(shiftDateKey(today.dateKey, -1)),
+    today,
+    serviceDayForDateKey(shiftDateKey(today.dateKey, 1)),
   ];
 }
 

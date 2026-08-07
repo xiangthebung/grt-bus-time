@@ -117,7 +117,7 @@ test("addSavedStop keeps stop + route pairs unique", async () => {
   );
 });
 
-test("direction-aware duplicates migrate to one route pair", async () => {
+test("direction-aware saved entries preserve distinct journeys", async () => {
   syncStore.savedStops = [
     { ...saved[0], directionId: "0", directionHeadsign: "Downtown" },
     {
@@ -130,11 +130,31 @@ test("direction-aware duplicates migrate to one route pair", async () => {
   ];
 
   const migrated = await getSavedStops();
-  assert.equal(migrated.length, 1);
-  assert.equal(migrated[0].routeId, "r7");
-  assert.equal(migrated[0].directionId, undefined);
-  assert.equal(migrated[0].directionHeadsign, undefined);
-  assert.equal(migrated[0].alertsEnabled, true);
+  assert.equal(migrated.length, 2);
+  assert.deepEqual(
+    migrated.map(({ directionId, directionHeadsign }) => [directionId, directionHeadsign]),
+    [
+      ["0", "Downtown"],
+      ["1", "Terminal"],
+    ],
+  );
+  assert.equal(migrated[1].alertsEnabled, true);
+});
+
+test("adding an explicit direction upgrades an older any-direction entry", async () => {
+  syncStore.savedStops = [{ ...saved[0] }];
+  const upgraded = await addSavedStop({
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r7",
+    routeShortName: "7",
+    directionId: "1",
+    directionHeadsign: "Terminal",
+  });
+  assert.equal(upgraded.length, 1);
+  assert.equal(upgraded[0].directionId, "1");
+  assert.equal(upgraded[0].directionHeadsign, "Terminal");
 });
 
 test("choosing a route upgrades a legacy all-routes entry in place", async () => {

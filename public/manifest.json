@@ -9,7 +9,7 @@
     "48": "icon.png",
     "128": "icon.png"
   },
-  "permissions": ["storage", "alarms", "geolocation", "offscreen"],
+  "permissions": ["storage", "alarms", "offscreen", "geolocation"],
   "optional_permissions": ["notifications"],
   "host_permissions": [
     "https://webapps.regionofwaterloo.ca/*",

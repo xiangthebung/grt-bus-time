@@ -58,7 +58,7 @@ return {
             "Live Grand River Transit departures for your saved stops, with optional Pro countdowns, alerts, and closest-stop ordering.";
           // `offscreen` is how the service worker reaches navigator.geolocation
           // for the closest-stop badge; only the Pro build has a badge.
-          manifest.permissions = ["storage", "alarms", "geolocation", "offscreen"];
+          manifest.permissions = ["storage", "alarms", "offscreen", "geolocation"];
           manifest.optional_permissions = ["notifications"];
           manifest.host_permissions = [
             "https://webapps.regionofwaterloo.ca/*",
@@ -89,6 +89,10 @@ return {
   build: {
     outDir: outputDirectory,
     emptyOutDir: true,
+    // Chrome extension pages report Vite's modulepreload links as
+    // cross-world resource mismatches. The popup is small and its normal
+    // module imports are reliable without those hints, so omit them.
+    modulePreload: false,
     target: "es2022",
     minify: "esbuild",
     rollupOptions: {

@@ -29,6 +29,8 @@ export const STATIC_GTFS_URL =
   "https://webapps.regionofwaterloo.ca/api/grt-routes/api/staticfeeds/1";
 
 const DOWNLOAD_TIMEOUT_MS = 45_000;
+const MAX_STATIC_FEED_BYTES = 50 * 1024 * 1024;
+const MAX_STATIC_DECOMPRESSED_BYTES = 250 * 1024 * 1024;
 
 /* ------------------------------------------------------------------ *
  * Parsing
@@ -377,16 +379,31 @@ function parseStopTimes(
 
 /** Turns a raw GTFS zip into the compact index. Pure: no storage access. */
 export function parseGtfsFeed(zipBytes: Uint8Array): GtfsIndex {
+  const wantedFiles = new Set([
+    "routes.txt",
+    "stops.txt",
+    "trips.txt",
+    "stop_times.txt",
+    "calendar_dates.txt",
+  ]);
+  let advertisedDecompressedBytes = 0;
   const files = unzipSync(zipBytes, {
-    filter: (file) =>
-      [
-        "routes.txt",
-        "stops.txt",
-        "trips.txt",
-        "stop_times.txt",
-        "calendar_dates.txt",
-      ].includes(file.name),
+    filter: (file) => {
+      if (!wantedFiles.has(file.name)) return false;
+      advertisedDecompressedBytes += file.originalSize;
+      if (advertisedDecompressedBytes > MAX_STATIC_DECOMPRESSED_BYTES) {
+        throw new Error("The GRT schedule expands beyond the supported size.");
+      }
+      return true;
+    },
   });
+  const decompressedBytes = Object.values(files).reduce(
+    (total, file) => total + file.byteLength,
+    0,
+  );
+  if (decompressedBytes > MAX_STATIC_DECOMPRESSED_BYTES) {
+    throw new Error("The GRT schedule expands beyond the supported size.");
+  }
 
   const routes = parseRoutes(decodeEntry(files, "routes.txt"));
   if (routes.length === 0) throw new Error("The GRT feed contained no routes.");
@@ -459,5 +476,13 @@ export async function downloadGtfsFeed(): Promise<GtfsIndex> {
   if (!response.ok) {
     throw new Error(`The GRT schedule server returned HTTP ${response.status}.`);
   }
-  return parseGtfsFeed(new Uint8Array(await response.arrayBuffer()));
+  const advertised = Number(response.headers.get("content-length"));
+  if (Number.isFinite(advertised) && advertised > MAX_STATIC_FEED_BYTES) {
+    throw new Error("The GRT schedule download is larger than expected.");
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_STATIC_FEED_BYTES) {
+    throw new Error("The GRT schedule download is larger than expected.");
+  }
+  return parseGtfsFeed(bytes);
 }

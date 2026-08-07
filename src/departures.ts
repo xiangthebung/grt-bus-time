@@ -420,7 +420,8 @@ export function getDepartureBoard(
  * `routeId` narrows the route half of that to one route, so a rider watching a
  * single bus is not shown a detour on a route they are not waiting for. Alerts
  * naming the stop itself still come through either way: those affect them
- * whichever bus they are there for.
+ * whichever departure they are there for. If the feed includes direction
+ * selectors, an explicitly saved direction narrows those too.
  */
 export function alertsForStop(
   index: GtfsIndex,
@@ -428,6 +429,7 @@ export function alertsForStop(
   stopId: string,
   routeId?: string,
   now = Date.now(),
+  directionId?: DirectionId,
 ): ServiceAlert[] {
   const relevantRoutes = new Set(
     routeId ? [routeId] : (index.routeIdsByStop.get(stopId) ?? []),
@@ -435,6 +437,14 @@ export function alertsForStop(
   return snapshot.alerts.filter((alert) => {
     if (alert.startMs !== undefined && alert.startMs > now + 60 * 60 * 1000) return false;
     if (alert.endMs !== undefined && alert.endMs < now) return false;
+    if (
+      directionId &&
+      alert.directionIds !== undefined &&
+      alert.directionIds.length > 0 &&
+      !alert.directionIds.includes(directionId)
+    ) {
+      return false;
+    }
     if (alert.stopIds.includes(stopId)) return true;
     return alert.routeIds.some((routeId) => relevantRoutes.has(routeId));
   });

@@ -12,7 +12,7 @@ export const GTFS_SCHEMA_VERSION = 5;
 export const AGENCY_TIME_ZONE = "America/Toronto";
 
 /** How long a downloaded static feed is trusted before a background refresh. */
-export const STATIC_FEED_TTL_MS = 12 * 60 * 60 * 1000;
+export const STATIC_FEED_TTL_MS = 6 * 60 * 60 * 1000;
 
 /** Realtime predictions older than this are treated as unusable. */
 export const REALTIME_STALE_MS = 3 * 60 * 1000;
@@ -59,7 +59,7 @@ export interface StopTimeBlock {
   sequence: Uint16Array;
 }
 
-/** A route + direction pattern a rider can browse. */
+/** A route + GTFS direction pattern a rider can browse. */
 export interface RoutePattern {
   routeId: string;
   directionId: string;
@@ -101,11 +101,27 @@ export interface GtfsIndex {
 }
 
 /**
- * A rider's saved stop + route pair.
+ * Returns the GTFS directions that actually call at one physical stop for a
+ * route. A route usually has two patterns, but a stop is normally present in
+ * only one of them. The route-wide pattern list is therefore not enough to
+ * decide whether a rider needs to choose a destination.
+ */
+export function directionsAtStop(
+  index: Pick<GtfsIndex, "patterns">,
+  stopId: string,
+  routeId: string,
+): DirectionId[] {
+  return DIRECTION_IDS.filter((directionId) =>
+    index.patterns.get(patternKey(routeId, directionId))?.stopIds.includes(stopId),
+  );
+}
+
+/**
+ * A rider's saved stop + route + optional direction.
  *
  * `routeId` is optional only for entries created by older builds, which watched
- * every route at a stop. New entries always name one route, and the same pair
- * cannot be saved twice.
+ * every route at a stop. New entries always name one route. A missing direction
+ * is an all-destinations legacy entry retained for older saved entries.
  */
 export interface SavedStop {
   id: string;
@@ -114,6 +130,10 @@ export interface SavedStop {
   stopName: string;
   /** When set, only this route counts for this entry. */
   routeId?: string;
+  /** When set, only this route direction counts for this entry. */
+  directionId?: DirectionId;
+  /** Denormalised destination shown before the timetable has loaded. */
+  directionHeadsign?: string;
   /**
    * Denormalised so the card can name the route before the feed has loaded, the
    * same reason `stopName` is stored. The live feed wins whenever it is around,
@@ -185,6 +205,8 @@ export interface ServiceAlert {
   body: string;
   routeIds: string[];
   stopIds: string[];
+  /** Direction selectors from the feed, when the agency supplied them. */
+  directionIds?: DirectionId[];
   startMs?: number;
   endMs?: number;
   url?: string;
@@ -194,6 +216,10 @@ export interface RealtimeSnapshot {
   fetchedAt: number;
   /** Feed header timestamp in epoch ms, when provided. */
   feedTimestamp?: number;
+  /** Whether each independent GRT realtime feed was available in this snapshot. */
+  tripUpdatesAvailable: boolean;
+  vehiclePositionsAvailable: boolean;
+  alertsAvailable: boolean;
   trips: RealtimeTrip[];
   vehicles: RealtimeVehicle[];
   alerts: ServiceAlert[];
@@ -203,11 +229,30 @@ export interface RealtimeSnapshot {
 
 export const EMPTY_REALTIME: RealtimeSnapshot = {
   fetchedAt: 0,
+  tripUpdatesAvailable: false,
+  vehiclePositionsAvailable: false,
+  alertsAvailable: false,
   trips: [],
   vehicles: [],
   alerts: [],
   degraded: false,
 };
+
+/** True when trip predictions are recent both locally and at the agency. */
+export function realtimePredictionsFresh(
+  snapshot: RealtimeSnapshot,
+  now = Date.now(),
+): boolean {
+  if (!snapshot.tripUpdatesAvailable) return false;
+  if (now - snapshot.fetchedAt > REALTIME_STALE_MS) return false;
+  if (snapshot.feedTimestamp === undefined) return true;
+  // A small future allowance covers clock skew without accepting an obviously
+  // malformed header as fresh data.
+  return (
+    snapshot.feedTimestamp <= now + 60_000 &&
+    now - snapshot.feedTimestamp <= REALTIME_STALE_MS
+  );
+}
 
 /* ------------------------------------------------------------------ *
  * Departures

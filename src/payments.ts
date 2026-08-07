@@ -15,6 +15,13 @@ function createClient(): ExtPayClient | undefined {
 }
 
 let backgroundStarted = false;
+const PAYMENT_ACCESS_KEY = "paymentAccess";
+const PAYMENT_GRACE_MS = 24 * 60 * 60 * 1000;
+
+interface CachedPaymentAccess {
+  paid: boolean;
+  checkedAt: number;
+}
 
 export function startPaymentBackground(): void {
   if (backgroundStarted) return;
@@ -26,6 +33,36 @@ export function startPaymentBackground(): void {
 
 export async function getPaymentUser(): Promise<Awaited<ReturnType<ExtPayClient["getUser"]>> | undefined> {
   return createClient()?.getUser();
+}
+
+/**
+ * Keeps a bounded last-known entitlement through a temporary provider failure.
+ * A service-worker restart must not turn a paid rider's badge off merely because
+ * ExtensionPay is having a short outage, but the grace period is finite so this
+ * is not an indefinite entitlement cache.
+ */
+export async function getPaymentAccess(): Promise<{
+  paid: boolean;
+  unavailable: boolean;
+}> {
+  if (!PAYMENTS_CONFIGURED) return { paid: false, unavailable: false };
+  try {
+    const user = await getPaymentUser();
+    const paid = Boolean(user?.paid);
+    await chrome.storage.local.set({
+      [PAYMENT_ACCESS_KEY]: { paid, checkedAt: Date.now() } satisfies CachedPaymentAccess,
+    });
+    return { paid, unavailable: false };
+  } catch (error) {
+    console.warn("Could not check ExtensionPay access", error);
+    const stored = await chrome.storage.local.get(PAYMENT_ACCESS_KEY);
+    const cached = stored[PAYMENT_ACCESS_KEY] as Partial<CachedPaymentAccess> | undefined;
+    const usable =
+      cached?.paid === true &&
+      typeof cached.checkedAt === "number" &&
+      Date.now() - cached.checkedAt <= PAYMENT_GRACE_MS;
+    return { paid: usable, unavailable: true };
+  }
 }
 
 /**

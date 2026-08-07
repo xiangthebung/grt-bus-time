@@ -20,6 +20,7 @@ register(new URL("./src-hooks.mjs", import.meta.url));
 
 const { decodeRealtimeSnapshot } = await import("../src/gtfsRealtime.ts");
 const { alertsForStop } = await import("../src/departures.ts");
+const { realtimePredictionsFresh } = await import("../src/types.ts");
 
 const { transit_realtime } = bindings;
 
@@ -41,13 +42,14 @@ const encodeFeed = (entity, header = {}) =>
 const NO_TRIP_UPDATES = encodeFeed([]);
 
 /** `period` goes straight onto `active_period`, so an absent `end` stays absent. */
-const alertEntity = (id, period, informed) => ({
+const alertEntity = (id, period, informed, url) => ({
   id,
   alert: {
     activePeriod: [period],
     informedEntity: [informed],
     headerText: { translation: [{ language: "en", text: `${id} headline` }] },
     descriptionText: { translation: [{ language: "en", text: "Detour in effect." }] },
+    ...(url ? { url: { translation: [{ language: "en", text: url }] } } : {}),
   },
 });
 
@@ -107,6 +109,33 @@ test("an active period the agency really did bound is still honoured", () => {
     shown.map((entry) => entry.id),
     ["running", "route-wide"],
   );
+});
+
+test("direction-specific alert selectors stay attached to the alert", () => {
+  const snapshot = decodeAlerts([
+    alertEntity("outbound", { start: seconds(NOW - HOUR_MS) }, {
+      routeId: "7",
+      directionId: 0,
+    }),
+  ]);
+  assert.deepEqual(snapshot.alerts[0].directionIds, ["0"]);
+  assert.equal(
+    alertsForStop(indexStub({ 1122: ["7"] }), snapshot, "1122", "7", NOW, "1").length,
+    0,
+  );
+  assert.equal(
+    alertsForStop(indexStub({ 1122: ["7"] }), snapshot, "1122", "7", NOW, "0").length,
+    1,
+  );
+});
+
+test("alert links keep only safe web URLs", () => {
+  const snapshot = decodeAlerts([
+    alertEntity("safe", { start: seconds(NOW - HOUR_MS) }, { stopId: "1122" }, "https://grt.example/alert"),
+    alertEntity("unsafe", { start: seconds(NOW - HOUR_MS) }, { stopId: "1122" }, "javascript:alert(1)"),
+  ]);
+  assert.equal(snapshot.alerts[0].url, "https://grt.example/alert");
+  assert.equal(snapshot.alerts[1].url, undefined);
 });
 
 test("a vehicle at the first stop of its trip is not mistaken for one with no position", () => {
@@ -209,4 +238,37 @@ test("a delay-only stop time update reports no predicted time rather than 1970",
   );
   assert.equal(stopTimes["delay-only"].time, undefined);
   assert.equal(stopTimes.predicted.time, seconds(NOW + 5 * MINUTE_MS));
+});
+
+test("a partial snapshot preserves alerts and vehicle data when trip updates fail", () => {
+  const snapshot = decodeRealtimeSnapshot({
+    vehiclePositions: encodeFeed([
+      { id: "v1", vehicle: { trip: { tripId: "trip-a" }, currentStopSequence: 4 } },
+    ]),
+    alerts: encodeFeed([]),
+  });
+  assert.equal(snapshot.tripUpdatesAvailable, false);
+  assert.equal(snapshot.vehiclePositionsAvailable, true);
+  assert.equal(snapshot.alertsAvailable, true);
+  assert.equal(snapshot.degraded, true);
+  assert.equal(snapshot.vehicles.length, 1);
+  assert.equal(realtimePredictionsFresh(snapshot, NOW), false);
+});
+
+test("agency feed age makes a freshly downloaded frozen feed unusable", () => {
+  const snapshot = decodeRealtimeSnapshot({
+    tripUpdates: encodeFeed([], { timestamp: seconds(NOW - 10 * MINUTE_MS) }),
+  });
+  assert.equal(snapshot.tripUpdatesAvailable, true);
+  assert.equal(snapshot.feedTimestamp, NOW - 10 * MINUTE_MS);
+  assert.equal(realtimePredictionsFresh(snapshot, NOW), false);
+});
+
+test("an omitted feed timestamp does not masquerade as Unix epoch", () => {
+  const bytes = transit_realtime.FeedMessage.encode({
+    header: { gtfsRealtimeVersion: "2.0" },
+    entity: [],
+  }).finish();
+  const snapshot = decodeRealtimeSnapshot({ tripUpdates: bytes });
+  assert.equal(snapshot.feedTimestamp, undefined);
 });

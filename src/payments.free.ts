@@ -9,6 +9,10 @@ export async function getPaymentUser(): Promise<undefined> {
   return undefined;
 }
 
+export async function getPaymentAccess(): Promise<{ paid: false; unavailable: false }> {
+  return { paid: false, unavailable: false };
+}
+
 export async function getPaymentPlans(): Promise<[]> {
   return [];
 }

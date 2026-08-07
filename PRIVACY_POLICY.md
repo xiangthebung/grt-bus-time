@@ -2,7 +2,7 @@
 
 Effective: July 28, 2026
 
-GRT Next Bus shows Grand River Transit departures for the stops you save. It talks to exactly two servers: the Region of Waterloo's transit feed, and — in the Pro build only — ExtensionPay for the subscription. It has no server of its own, no analytics, and no account beyond the one ExtensionPay needs to bill you.
+GRT Next Bus shows Grand River Transit departures for the stops you save. Its own network requests go to exactly two services: the Region of Waterloo's transit feed, and — in the Pro build only — ExtensionPay for the subscription. It has no server of its own, no analytics, and no account beyond the one ExtensionPay needs to bill you.
 
 This policy covers both builds: **GRT Next Bus** (with Pro features) and **GRT Next Bus Free**.
 
@@ -30,7 +30,7 @@ In the Pro build, the service worker needs a position to keep the toolbar countd
 
 `chrome.storage.sync` — synchronised through your Google account if Chrome Sync is on:
 
-- your saved stops: stop id, stop code, stop name, route and direction selection, alert preferences, display order
+- your saved stops: stop id, stop code, stop name, route and inferred/selected destination, alert preferences, display order
 - your settings: how many departures to show per stop, theme, and similar preferences
 
 Because this uses `chrome.storage.sync`, a list of the stops you travel from is part of your Chrome sync data, like a bookmark would be. If you would rather it were not, turn off extension syncing in Chrome's settings; the extension keeps working.
@@ -40,6 +40,7 @@ Because this uses `chrome.storage.sync`, a list of the stops you travel from is 
 - your last known position and its accuracy, as described above
 - the location consent flag
 - alert bookkeeping, so the same bus is not announced twice
+- the last-known Pro entitlement and when it was checked, so a brief payment-service outage does not remove access immediately
 
 `chrome.storage.session` — memory-only, discarded when Chrome exits:
 
@@ -55,6 +56,11 @@ IndexedDB (database `grt-next-bus`):
 `https://webapps.regionofwaterloo.ca/*` — the static GTFS timetable and the GTFS-realtime feed. These are ordinary public requests for a published schedule. They carry no identifier the extension invented; the request tells the Region that someone asked for the feed, and nothing about which stops you care about, because filtering happens on your device after the whole feed arrives.
 
 `https://extensionpay.com/*` — Pro build only. Used to check whether your subscription is active and to open the checkout and login pages. See below.
+
+When you choose **Map** beside a nearby stop, Chrome opens Google Maps in a new tab with
+that stop's public coordinates. That is a user-initiated navigation, not a request made
+by the extension; Google receives the stop location under Google's own privacy policy.
+The rider's location is never put in that link.
 
 `connect-src` in the manifest is restricted to exactly these two origins, so the extension cannot reach anywhere else even by accident. The Free build's policy lists only the transit feed.
 

@@ -12,6 +12,7 @@ import type {
   RealtimeSnapshot,
   RealtimeTrip,
   RealtimeVehicle,
+  DirectionId,
   ServiceAlert,
 } from "./types";
 
@@ -22,6 +23,7 @@ export const VEHICLE_POSITIONS_URL = `${API_BASE}/vehiclepositions/1`;
 export const SERVICE_ALERTS_URL = `${API_BASE}/alerts/1`;
 
 const FEED_TIMEOUT_MS = 12_000;
+const MAX_REALTIME_FEED_BYTES = 8 * 1024 * 1024;
 
 function toNumber(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
@@ -74,7 +76,15 @@ async function fetchFeed(url: string): Promise<Uint8Array> {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return new Uint8Array(await response.arrayBuffer());
+    const advertised = Number(response.headers.get("content-length"));
+    if (Number.isFinite(advertised) && advertised > MAX_REALTIME_FEED_BYTES) {
+      throw new Error("the realtime feed is larger than expected");
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_REALTIME_FEED_BYTES) {
+      throw new Error("the realtime feed is larger than expected");
+    }
+    return bytes;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error("timed out");
@@ -218,6 +228,15 @@ function splitAlertText(
   return { title: headline, body };
 }
 
+function safeAlertUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeAlerts(feed: transit_realtime.FeedMessage): ServiceAlert[] {
   const alerts: ServiceAlert[] = [];
   for (const entity of feed.entity ?? []) {
@@ -231,10 +250,19 @@ function normalizeAlerts(feed: transit_realtime.FeedMessage): ServiceAlert[] {
 
     const routeIds = new Set<string>();
     const stopIds = new Set<string>();
+    const directionIds = new Set<DirectionId>();
     for (const informed of alert.informedEntity ?? []) {
       if (informed.routeId) routeIds.add(informed.routeId);
       if (informed.stopId) stopIds.add(informed.stopId);
       if (informed.trip?.routeId) routeIds.add(informed.trip.routeId);
+      const informedDirection = numberIfPresent(informed, "directionId");
+      if (informedDirection === 0 || informedDirection === 1) {
+        directionIds.add(String(informedDirection) as DirectionId);
+      }
+      const tripDirection = numberIfPresent(informed.trip, "directionId");
+      if (tripDirection === 0 || tripDirection === 1) {
+        directionIds.add(String(tripDirection) as DirectionId);
+      }
     }
 
     const period = alert.activePeriod?.[0];
@@ -243,13 +271,14 @@ function normalizeAlerts(feed: transit_realtime.FeedMessage): ServiceAlert[] {
     // alert that finished in 1970 and `alertsForStop` discards it.
     const start = numberIfPresent(period, "start");
     const end = numberIfPresent(period, "end");
-    const url = pickTranslation(alert.url);
+    const url = safeAlertUrl(pickTranslation(alert.url));
     alerts.push({
       id: entity.id || `${title}-${start ?? 0}`,
       title: title || "Service alert",
       body,
       routeIds: [...routeIds],
       stopIds: [...stopIds],
+      ...(directionIds.size > 0 ? { directionIds: [...directionIds] } : {}),
       ...(start !== undefined ? { startMs: start * 1000 } : {}),
       ...(end !== undefined ? { endMs: end * 1000 } : {}),
       ...(url ? { url } : {}),
@@ -263,24 +292,32 @@ function normalizeAlerts(feed: transit_realtime.FeedMessage): ServiceAlert[] {
  * ------------------------------------------------------------------ */
 
 export interface RealtimeFeedBytes {
-  tripUpdates: Uint8Array;
+  tripUpdates?: Uint8Array;
   vehiclePositions?: Uint8Array;
   alerts?: Uint8Array;
 }
 
 /** Decodes raw protobuf payloads into the snapshot the UI consumes. */
 export function decodeRealtimeSnapshot(bytes: RealtimeFeedBytes): RealtimeSnapshot {
-  const updates = decodeFeed(bytes.tripUpdates);
-  const feedTimestamp = toNumber(updates.header?.timestamp);
+  const updates = bytes.tripUpdates ? decodeFeed(bytes.tripUpdates) : undefined;
+  const feedTimestamp = numberIfPresent(updates?.header, "timestamp");
+  const vehicleFeed = bytes.vehiclePositions
+    ? decodeFeed(bytes.vehiclePositions)
+    : undefined;
+  const alertFeed = bytes.alerts ? decodeFeed(bytes.alerts) : undefined;
+  const tripUpdatesAvailable = updates !== undefined;
+  const vehiclePositionsAvailable = vehicleFeed !== undefined;
+  const alertsAvailable = alertFeed !== undefined;
   return {
     fetchedAt: Date.now(),
     ...(feedTimestamp !== undefined ? { feedTimestamp: feedTimestamp * 1000 } : {}),
-    trips: normalizeTripUpdates(updates),
-    vehicles: bytes.vehiclePositions
-      ? normalizeVehicles(decodeFeed(bytes.vehiclePositions))
-      : [],
-    alerts: bytes.alerts ? normalizeAlerts(decodeFeed(bytes.alerts)) : [],
-    degraded: !bytes.vehiclePositions || !bytes.alerts,
+    tripUpdatesAvailable,
+    vehiclePositionsAvailable,
+    alertsAvailable,
+    trips: updates ? normalizeTripUpdates(updates) : [],
+    vehicles: vehicleFeed ? normalizeVehicles(vehicleFeed) : [],
+    alerts: alertFeed ? normalizeAlerts(alertFeed) : [],
+    degraded: !tripUpdatesAvailable || !vehiclePositionsAvailable || !alertsAvailable,
   };
 }
 
@@ -291,16 +328,20 @@ export async function fetchRealtimeSnapshot(): Promise<RealtimeSnapshot> {
     fetchFeed(SERVICE_ALERTS_URL),
   ]);
 
-  if (updates.status === "rejected") {
+  if (
+    updates.status === "rejected" &&
+    vehicles.status === "rejected" &&
+    alerts.status === "rejected"
+  ) {
     throw new Error(
-      `Live departures are unavailable right now (${
-        updates.reason instanceof Error ? updates.reason.message : "network error"
-      }).`,
+      `GRT live feeds are unavailable right now (${updates.reason instanceof Error
+        ? updates.reason.message
+        : "network error"}).`,
     );
   }
 
   return decodeRealtimeSnapshot({
-    tripUpdates: updates.value,
+    ...(updates.status === "fulfilled" ? { tripUpdates: updates.value } : {}),
     ...(vehicles.status === "fulfilled" ? { vehiclePositions: vehicles.value } : {}),
     ...(alerts.status === "fulfilled" ? { alerts: alerts.value } : {}),
   });

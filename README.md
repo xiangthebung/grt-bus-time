@@ -42,7 +42,7 @@ Two Web Store listings are built from this source. The channel is chosen by Vite
 | Built by | `npm run build` | `npm run build:free` |
 | Toolbar countdown, arrival alerts, closest-stop ordering | yes | no |
 | ExtensionPay bundled | yes | no — `payments.ts` is aliased away entirely |
-| Permissions | `storage`, `alarms`, `geolocation`, `offscreen` | `storage`, `alarms`, `geolocation` |
+| Permissions | `storage`, `alarms`, `offscreen`, `geolocation`; optional `notifications` | `storage`, `alarms`, `geolocation` |
 
 The free channel is selected with `--mode free` rather than a `BUILD_CHANNEL=free`
 prefix, because that prefix is shell syntax that cmd.exe and PowerShell do not
@@ -84,7 +84,11 @@ middle.
 | GTFS-Realtime service alerts | the alerts accordion |
 
 The static feed is parsed into typed arrays and cached in IndexedDB, refreshed
-every 12 hours, so a single download serves every service day the feed covers.
+every six hours, so a single download serves every service day the feed covers.
+
+The rider chooses a physical stop and route. The destination is inferred from the
+GRT stop ID and route pattern; only shared-platform stops expose separate destination
+rows.
 
 Data © Region of Waterloo.
 
@@ -92,8 +96,10 @@ Data © Region of Waterloo.
 
 Saved stops live in `chrome.storage.sync`. Location, when you opt in, is used on
 the device to decide which saved stop is closest and is never sent anywhere —
-there is no reverse geocoding call and no analytics. Consent is explicit and
-revoking it deletes the cached position.
+there is no reverse geocoding call and no analytics. Nearby results can optionally
+open a public stop coordinate in Google Maps when you click its Map link; your
+location is not included. Consent is explicit and revoking it deletes the cached
+position.
 
 The full policy is published at `/legal/grt-next-bus/privacy`.
 

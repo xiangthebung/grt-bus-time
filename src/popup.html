@@ -12,10 +12,21 @@
           <img class="brand-mark" src="./icon.svg" alt="" width="36" height="36" />
           <div class="brand-copy">
             <p class="brand-eyebrow">Grand River Transit</p>
-            <h1 class="brand-title">Next bus</h1>
+            <h1 class="brand-title">Next departure</h1>
           </div>
         </div>
         <div class="topbar-actions">
+          <button
+            class="topbar-add"
+            id="topbar-add-button"
+            type="button"
+            data-focus-key="topbar-add"
+            aria-expanded="false"
+            aria-controls="picker-body"
+            aria-label="Add a stop"
+          >
+            Add stop
+          </button>
           <button class="plan-chip" id="plan-button" type="button" hidden>Free</button>
           <button
             class="icon-button"
@@ -62,7 +73,7 @@
           <span class="feed-dot" id="feed-dot" aria-hidden="true"></span>
           <span id="feed-state-text">Loading schedule…</span>
         </span>
-        <span class="feed-detail" id="feed-detail" aria-live="polite"></span>
+        <span class="feed-detail" id="feed-detail"></span>
       </div>
 
       <div class="banner" id="banner" hidden>
@@ -139,8 +150,8 @@
         </div>
         <div class="stop-list" id="stop-list" role="list"></div>
         <div class="empty-state" id="empty-state" hidden>
-          <p class="empty-title">Save a stop to see departures</p>
-          <p class="empty-copy">
+          <p class="empty-title" id="empty-title">Save a stop to see departures</p>
+          <p class="empty-copy" id="empty-copy">
             Find the stop you use most, then GRT Next Bus keeps its next departures one click
             away.
           </p>
@@ -202,12 +213,14 @@
                 autocomplete="off"
                 spellcheck="false"
                 placeholder="Stop name or number"
+                aria-label="Search stops by name or number"
                 aria-describedby="search-hint"
               />
               <button class="ghost-button" id="near-button" type="button">Near me</button>
             </div>
             <p class="hint" id="search-hint">
-              Each result is one stop + route, ready to add.
+              Same-name locations stay grouped by stop ID. Each route row is one destination;
+              shared platforms show both destinations.
             </p>
             <ul class="result-list" id="search-results" role="list"></ul>
             <p class="result-empty" id="search-empty" hidden></p>
@@ -223,13 +236,7 @@
             <select class="select" id="route-select">
               <option value="">Choose a route</option>
             </select>
-            <div
-              class="chip-row"
-              id="direction-chips"
-              role="radiogroup"
-              aria-label="Direction"
-              hidden
-            ></div>
+            <p class="route-summary" id="route-summary" aria-live="polite" hidden></p>
             <ul class="result-list" id="route-stops" role="list"></ul>
             <p class="result-empty" id="route-empty" hidden></p>
           </div>

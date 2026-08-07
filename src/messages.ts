@@ -2,7 +2,7 @@
  * Typed request/response contract between the popup and the service worker.
  *
  * The worker owns every network call: it downloads and indexes the schedule
- * (so a 12 MB parse never blocks the popup) and it de-duplicates realtime
+ * (so a large parse never blocks the popup) and it de-duplicates realtime
  * polling across popup opens.
  */
 
@@ -44,6 +44,8 @@ export interface ScheduleReadyPayload {
   stopCount: number;
   /** True when the cached copy was reused instead of downloaded. */
   fromCache: boolean;
+  /** True when the cached copy is outside its normal freshness window. */
+  stale: boolean;
 }
 
 export interface NotificationStatusPayload {

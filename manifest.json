@@ -12,8 +12,8 @@
   "permissions": [
     "storage",
     "alarms",
-    "geolocation",
-    "offscreen"
+    "offscreen",
+    "geolocation"
   ],
   "optional_permissions": [
     "notifications"
