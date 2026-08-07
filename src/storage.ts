@@ -2,15 +2,11 @@
  * Saved stops and rider settings, kept in `chrome.storage.sync` so they follow
  * the rider between browsers.
  *
- * One entry per stop, holding the route/direction the rider is waiting for there.
- * A stop is one place, so two entries for it would be two cards with the same
- * name and the same code, each carrying a route selector that only spoke for one
- * of them — asking a rider to tell them apart by reading their departures.
- * Choosing a different route or direction at a stop already saved moves that
- * stop's entry instead.
+ * Each entry is one explicit stop + route pair. A stop served by several routes
+ * can therefore appear more than once, while the same pair is never duplicated.
  *
- * Entries written by the very first version were per route + direction + stop and
- * are collapsed on first read, as are any duplicates an older build let through.
+ * Entries written by the direction-aware version are collapsed to route pairs
+ * on first read, as are any exact duplicates an older build let through.
  */
 
 import {
@@ -18,7 +14,6 @@ import {
   DEFAULT_SETTINGS,
   DEPARTURES_PER_STOP_OPTIONS,
   MAX_SAVED_STOPS,
-  isDirectionId,
   type LegacyWatch,
   type SavedStop,
   type Settings,
@@ -40,7 +35,6 @@ function isSavedStop(value: unknown): value is SavedStop {
 
 function normalize(stop: SavedStop, fallbackPosition: number): SavedStop {
   const routeId = typeof stop.routeId === "string" && stop.routeId ? stop.routeId : undefined;
-  const directionId = routeId && isDirectionId(stop.directionId) ? stop.directionId : undefined;
   return {
     id: stop.id,
     stopId: stop.stopId,
@@ -53,12 +47,6 @@ function normalize(stop: SavedStop, fallbackPosition: number): SavedStop {
     typeof stop.routeShortName === "string" &&
     stop.routeShortName
       ? { routeShortName: stop.routeShortName }
-      : {}),
-    ...(directionId ? { directionId } : {}),
-    ...(directionId &&
-    typeof stop.directionHeadsign === "string" &&
-    stop.directionHeadsign
-      ? { directionHeadsign: stop.directionHeadsign }
       : {}),
     createdAt: typeof stop.createdAt === "number" ? stop.createdAt : Date.now(),
     position:
@@ -105,26 +93,27 @@ function sortStops(stops: SavedStop[]): SavedStop[] {
 }
 
 /**
- * Collapses repeats of a stop, keeping the one the rider put first.
+ * Collapses repeats of the same stop + route pair, keeping the first.
  *
  * Applied on every read rather than once behind a version check, so a list that
  * arrives over sync from a browser still running an older build is cleaned up
  * here too. Alerts survive the collapse: having asked to be told about a bus at
  * this stop is not something to lose quietly.
  */
-function collapseByStop(stops: SavedStop[]): SavedStop[] {
-  const byStopId = new Map<string, SavedStop>();
+function collapseByStopRoute(stops: SavedStop[]): SavedStop[] {
+  const byPair = new Map<string, SavedStop>();
   for (const stop of stops) {
-    const kept = byStopId.get(stop.stopId);
+    const key = `${stop.stopId}\u0000${stop.routeId ?? ""}`;
+    const kept = byPair.get(key);
     if (!kept) {
-      byStopId.set(stop.stopId, stop);
+      byPair.set(key, stop);
       continue;
     }
     if (stop.alertsEnabled && !kept.alertsEnabled) {
-      byStopId.set(stop.stopId, { ...kept, alertsEnabled: true });
+      byPair.set(key, { ...kept, alertsEnabled: true });
     }
   }
-  return [...byStopId.values()];
+  return [...byPair.values()];
 }
 
 /**
@@ -142,7 +131,7 @@ export async function getSavedStops(): Promise<SavedStop[]> {
   const stored = await chrome.storage.sync.get([SAVED_STOPS_KEY, LEGACY_WATCHES_KEY]);
   const raw = stored[SAVED_STOPS_KEY];
   if (Array.isArray(raw)) {
-    const stops = collapseByStop(sortStops(raw.filter(isSavedStop).map(normalize)));
+    const stops = collapseByStopRoute(sortStops(raw.filter(isSavedStop).map(normalize)));
     // Written back only when the collapse actually dropped something, so the
     // common read does not turn into a write and wake every other listener.
     return stops.length === raw.length ? stops : persist(stops);
@@ -159,40 +148,37 @@ export interface NewSavedStop {
   stopId: string;
   stopCode: string;
   stopName: string;
-  /** Omit to watch every route at the stop. */
-  routeId?: string;
+  routeId: string;
   routeShortName?: string;
-  /** When set with `routeId`, omit departures in the other direction. */
-  directionId?: SavedStop["directionId"];
-  /** Cached only for the picker/card label while the feed is loading. */
-  directionHeadsign?: string;
 }
 
-function savedStopFor(stops: readonly SavedStop[], stopId: string): SavedStop | undefined {
-  return stops.find((stop) => stop.stopId === stopId);
+function savedStopFor(
+  stops: readonly SavedStop[],
+  stopId: string,
+  routeId: string | undefined,
+): SavedStop | undefined {
+  return stops.find((stop) => stop.stopId === stopId && stop.routeId === routeId);
 }
 
 /**
- * Adds a stop, or points an already-saved one at a different route.
+ * Adds one stop + route pair. Repeated presses are idempotent.
  *
- * The two are one call because they are one intention: pressing a route at a
- * stop means "this is the bus I am waiting for here", whether or not the stop
- * was on the list already.
+ * An older all-routes entry at the same stop is upgraded in place the first
+ * time the rider chooses an explicit route, preserving its order and alerts.
  */
 export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
   const stops = await getSavedStops();
-  const existing = savedStopFor(stops, stop.stopId);
-  if (existing) {
-    return setStopRoute(
-      existing.id,
-      stop.routeId,
-      stop.routeShortName,
-      stop.directionId,
-      stop.directionHeadsign,
-    );
+  if (savedStopFor(stops, stop.stopId, stop.routeId)) return stops;
+
+  const legacy = savedStopFor(stops, stop.stopId, undefined);
+  if (legacy) {
+    return updateSavedStop(legacy.id, {
+      routeId: stop.routeId,
+      routeShortName: stop.routeShortName,
+    });
   }
   if (stops.length >= MAX_SAVED_STOPS) {
-    throw new Error(`You can save up to ${MAX_SAVED_STOPS} stops.`);
+    throw new Error(`You can save up to ${MAX_SAVED_STOPS} stop and route pairs.`);
   }
   return persist([
     ...stops,
@@ -202,35 +188,14 @@ export async function addSavedStop(stop: NewSavedStop): Promise<SavedStop[]> {
         stopId: stop.stopId,
         stopCode: stop.stopCode,
         stopName: stop.stopName,
-        ...(stop.routeId ? { routeId: stop.routeId } : {}),
+        routeId: stop.routeId,
         ...(stop.routeShortName ? { routeShortName: stop.routeShortName } : {}),
-        ...(stop.directionId ? { directionId: stop.directionId } : {}),
-        ...(stop.directionHeadsign ? { directionHeadsign: stop.directionHeadsign } : {}),
         createdAt: Date.now(),
         position: stops.length,
       },
       stops.length,
     ),
   ]);
-}
-
-/**
- * Narrows an entry to one route/direction, or widens it back to every route
- * when `routeId` is omitted.
- */
-export async function setStopRoute(
-  id: string,
-  routeId?: string,
-  routeShortName?: string,
-  directionId?: SavedStop["directionId"],
-  directionHeadsign?: string,
-): Promise<SavedStop[]> {
-  return updateSavedStop(id, {
-    routeId,
-    routeShortName,
-    directionId,
-    directionHeadsign,
-  });
 }
 
 export async function removeSavedStop(id: string): Promise<SavedStop[]> {
@@ -241,7 +206,7 @@ export async function removeSavedStop(id: string): Promise<SavedStop[]> {
 /** Puts a previously removed stop back, keeping its original position. */
 export async function restoreSavedStop(stop: SavedStop): Promise<SavedStop[]> {
   const stops = await getSavedStops();
-  if (savedStopFor(stops, stop.stopId)) return stops;
+  if (savedStopFor(stops, stop.stopId, stop.routeId)) return stops;
   const restored = [...stops];
   restored.splice(Math.min(stop.position, restored.length), 0, stop);
   return persist(restored);

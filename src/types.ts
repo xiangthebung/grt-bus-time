@@ -28,10 +28,6 @@ export const DEFAULT_DEPARTURES_PER_STOP = 3;
 export const DIRECTION_IDS = ["0", "1"] as const;
 export type DirectionId = (typeof DIRECTION_IDS)[number];
 
-export function isDirectionId(value: unknown): value is DirectionId {
-  return value === "0" || value === "1";
-}
-
 export const MAX_SAVED_STOPS = 12;
 
 export interface Route {
@@ -105,13 +101,11 @@ export interface GtfsIndex {
 }
 
 /**
- * A rider's saved stop, optionally narrowed to a route and direction. One per stop.
+ * A rider's saved stop + route pair.
  *
- * Most riders are waiting for one particular bus, so `routeId` and `directionId`
- * are what the card and badge filter on. Leaving them unset keeps the older
- * behaviour — whichever bus comes next — which is what every stop saved before
- * these fields existed does, and what a rider who really does take the first
- * thing that shows up wants.
+ * `routeId` is optional only for entries created by older builds, which watched
+ * every route at a stop. New entries always name one route, and the same pair
+ * cannot be saved twice.
  */
 export interface SavedStop {
   id: string;
@@ -120,16 +114,12 @@ export interface SavedStop {
   stopName: string;
   /** When set, only this route counts for this entry. */
   routeId?: string;
-  /** When set with `routeId`, only this route's headsign/direction counts. */
-  directionId?: DirectionId;
   /**
    * Denormalised so the card can name the route before the feed has loaded, the
    * same reason `stopName` is stored. The live feed wins whenever it is around,
    * so a route GRT has since renamed corrects itself.
    */
   routeShortName?: string;
-  /** Denormalised headsign for showing the direction before the feed is ready. */
-  directionHeadsign?: string;
   createdAt: number;
   /** Manual sort position; lower comes first. */
   position: number;

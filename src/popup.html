@@ -207,15 +207,19 @@
               <button class="ghost-button" id="near-button" type="button">Near me</button>
             </div>
             <p class="hint" id="search-hint">
-              Every GRT stop has a number printed on the pole. Use Follow to choose a route
-              and destination.
+              Each result is one stop + route, ready to add.
             </p>
             <ul class="result-list" id="search-results" role="list"></ul>
             <p class="result-empty" id="search-empty" hidden></p>
           </div>
 
           <div class="pane" id="pane-route" role="tabpanel" aria-labelledby="tab-route" hidden>
-            <label class="field-label" for="route-select">Route</label>
+            <div class="route-field-head">
+              <label class="field-label" for="route-select">Route</label>
+              <button class="route-near-button" id="route-near-button" type="button" disabled>
+                Near me
+              </button>
+            </div>
             <select class="select" id="route-select">
               <option value="">Choose a route</option>
             </select>
@@ -227,6 +231,7 @@
               hidden
             ></div>
             <ul class="result-list" id="route-stops" role="list"></ul>
+            <p class="result-empty" id="route-empty" hidden></p>
           </div>
         </div>
       </section>

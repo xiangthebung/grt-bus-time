@@ -5,9 +5,36 @@ import test from "node:test";
 register(new URL("./src-hooks.mjs", import.meta.url));
 
 const saved = [
-  { id: "a", stopId: "a", stopCode: "1000", stopName: "A", createdAt: 1, position: 0 },
-  { id: "b", stopId: "b", stopCode: "2000", stopName: "B", createdAt: 2, position: 1 },
-  { id: "c", stopId: "c", stopCode: "3000", stopName: "C", createdAt: 3, position: 2 },
+  {
+    id: "a",
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r7",
+    routeShortName: "7",
+    createdAt: 1,
+    position: 0,
+  },
+  {
+    id: "b",
+    stopId: "b",
+    stopCode: "2000",
+    stopName: "B",
+    routeId: "r13",
+    routeShortName: "13",
+    createdAt: 2,
+    position: 1,
+  },
+  {
+    id: "c",
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r8",
+    routeShortName: "8",
+    createdAt: 3,
+    position: 2,
+  },
 ];
 const syncStore = { savedStops: structuredClone(saved) };
 
@@ -25,7 +52,13 @@ globalThis.chrome = {
   },
 };
 
-const { reorderSavedStops, setStopRoute } = await import("../src/storage.ts");
+const { addSavedStop, getSavedStops, reorderSavedStops } = await import(
+  "../src/storage.ts"
+);
+
+test.beforeEach(() => {
+  syncStore.savedStops = structuredClone(saved);
+});
 
 test("reorderSavedStops persists a complete order and rejects incomplete orders", async () => {
   const reordered = await reorderSavedStops(["c", "a", "b"]);
@@ -61,18 +94,71 @@ test("reorderSavedStops persists a complete order and rejects incomplete orders"
   );
 });
 
-test("setStopRoute persists and clears a direction with the route filter", async () => {
-  const narrowed = await setStopRoute("a", "r13", "13", "1", "Fairview Park Mall");
-  assert.equal(narrowed[1].directionId, "1");
-  assert.equal(narrowed[1].directionHeadsign, "Fairview Park Mall");
+test("addSavedStop keeps stop + route pairs unique", async () => {
+  const duplicate = await addSavedStop({
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r7",
+    routeShortName: "7",
+  });
+  assert.equal(duplicate.length, 3, "the same pair must not be added twice");
 
-  const routeOnly = await setStopRoute("a", "r13", "13");
-  assert.equal(routeOnly[1].routeId, "r13");
-  assert.equal(routeOnly[1].directionId, undefined);
-  assert.equal(routeOnly[1].directionHeadsign, undefined);
+  const anotherRoute = await addSavedStop({
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r12",
+    routeShortName: "12",
+  });
+  assert.equal(anotherRoute.length, 4, "another route at the same stop is a new pair");
+  assert.ok(
+    anotherRoute.some((entry) => entry.stopId === "a" && entry.routeId === "r12"),
+  );
+});
 
-  const everyRoute = await setStopRoute("a");
-  assert.equal(everyRoute[1].routeId, undefined);
-  assert.equal(everyRoute[1].directionId, undefined);
-  assert.equal(everyRoute[1].directionHeadsign, undefined);
+test("direction-aware duplicates migrate to one route pair", async () => {
+  syncStore.savedStops = [
+    { ...saved[0], directionId: "0", directionHeadsign: "Downtown" },
+    {
+      ...saved[0],
+      id: "a-other-direction",
+      directionId: "1",
+      directionHeadsign: "Terminal",
+      alertsEnabled: true,
+    },
+  ];
+
+  const migrated = await getSavedStops();
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].routeId, "r7");
+  assert.equal(migrated[0].directionId, undefined);
+  assert.equal(migrated[0].directionHeadsign, undefined);
+  assert.equal(migrated[0].alertsEnabled, true);
+});
+
+test("choosing a route upgrades a legacy all-routes entry in place", async () => {
+  syncStore.savedStops = [
+    {
+      id: "legacy",
+      stopId: "a",
+      stopCode: "1000",
+      stopName: "A",
+      createdAt: 1,
+      position: 0,
+      alertsEnabled: true,
+    },
+  ];
+
+  const upgraded = await addSavedStop({
+    stopId: "a",
+    stopCode: "1000",
+    stopName: "A",
+    routeId: "r7",
+    routeShortName: "7",
+  });
+  assert.equal(upgraded.length, 1);
+  assert.equal(upgraded[0].id, "legacy");
+  assert.equal(upgraded[0].routeId, "r7");
+  assert.equal(upgraded[0].alertsEnabled, true);
 });

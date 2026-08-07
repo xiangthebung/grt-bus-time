@@ -54,7 +54,6 @@ import {
   restoreSavedStop,
   saveSettings,
   setStopAlerts,
-  setStopRoute,
 } from "./storage";
 import { serviceDateKey } from "./time";
 import {
@@ -66,8 +65,8 @@ import {
   MAX_SAVED_STOPS,
   patternKey,
   REALTIME_STALE_MS,
-  type GtfsIndex,
   type DirectionId,
+  type GtfsIndex,
   type Route,
   type SavedStop,
   type ServiceAlert,
@@ -117,6 +116,7 @@ const el = {
   emptyState: query<HTMLElement>("#empty-state"),
   emptyNearButton: query<HTMLButtonElement>("#empty-near-button"),
   emptySearchButton: query<HTMLButtonElement>("#empty-search-button"),
+  picker: query<HTMLElement>("#picker"),
   pickerToggle: query<HTMLButtonElement>("#picker-toggle"),
   pickerBody: query<HTMLElement>("#picker-body"),
   tabSearch: query<HTMLButtonElement>("#tab-search"),
@@ -128,8 +128,10 @@ const el = {
   searchResults: query<HTMLElement>("#search-results"),
   searchEmpty: query<HTMLElement>("#search-empty"),
   routeSelect: query<HTMLSelectElement>("#route-select"),
+  routeNearButton: query<HTMLButtonElement>("#route-near-button"),
   directionChips: query<HTMLElement>("#direction-chips"),
   routeStops: query<HTMLElement>("#route-stops"),
+  routeEmpty: query<HTMLElement>("#route-empty"),
   planOverlay: query<HTMLElement>("#plan-overlay"),
   planDialog: query<HTMLElement>("#plan-dialog"),
   planClose: query<HTMLButtonElement>("#plan-close"),
@@ -174,6 +176,8 @@ interface AppState {
   searchTerm: string;
   nearbyStops?: StopWithDistance[];
   locatingNearby: boolean;
+  routeNearbyStops?: StopWithDistance[];
+  locatingRouteNearby: boolean;
   distancesById?: Map<string, number>;
   nearestSavedId?: string;
   selectedRouteId: string;
@@ -200,6 +204,7 @@ const state: AppState = {
   pickerTab: "search",
   searchTerm: "",
   locatingNearby: false,
+  locatingRouteNearby: false,
   selectedRouteId: "",
   selectedDirectionId: "",
   alertsExpanded: false,
@@ -443,7 +448,6 @@ function boardFor(saved: SavedStop): DepartureBoard {
     // Wide enough to find later runs of whichever route comes first.
     limit: Math.min(24, state.settings.departuresPerStop * 4),
     ...(saved.routeId ? { routeId: saved.routeId } : {}),
-    ...(saved.directionId ? { directionId: saved.directionId } : {}),
   });
 }
 
@@ -567,42 +571,43 @@ function routeBadge(route: { shortName: string; color?: string }): HTMLElement {
 }
 
 interface TimeLabels {
-  primary: string;
-  secondary: string;
+  countdown: string;
+  clock: string;
   className: string;
 }
 
 /**
- * Within the hour a countdown is what riders want; beyond that the clock time
- * is far more useful, so the two swap places.
+ * Clock time is the stable schedule; the countdown is the quick urgency cue.
+ * Keeping those roles fixed prevents the row from changing its reading order
+ * as a departure crosses the one-hour boundary.
  *
- * When a live bus is past its predicted time, the countdown slot shows the
- * delay instead of "Due" — that is the number the rider's eyes are on, and
- * "Due" says nothing about how late the bus actually is.
+ * When a live bus is past its predicted time, the countdown shows the delay
+ * instead of "Due" — that is more honest and useful at a glance.
  */
 function departureLabels(timeMs: number, delaySec?: number, now = Date.now()): TimeLabels {
   const minutes = minutesUntil(timeMs, now);
   const dayPrefix =
     serviceDateKey(timeMs) === serviceDateKey(now) ? "" : `${formatWeekday(timeMs)} `;
+  const clock = `${dayPrefix}${formatClock(timeMs)}`;
   if (minutes < 60) {
     const overdue =
       delaySec === undefined ? undefined : formatOverdueDelay(timeMs, delaySec, now);
     if (overdue) {
       return {
-        primary: overdue,
-        secondary: `${dayPrefix}${formatClock(timeMs)}`,
+        countdown: overdue,
+        clock,
         className: "countdown is-soon",
       };
     }
     return {
-      primary: formatCountdown(timeMs, now),
-      secondary: `${dayPrefix}${formatClock(timeMs)}`,
+      countdown: formatCountdown(timeMs, now),
+      clock,
       className: `countdown${minutes <= 2 ? " is-soon" : minutes <= 5 ? " is-near" : ""}`,
     };
   }
   return {
-    primary: `${dayPrefix}${formatClock(timeMs)}`,
-    secondary: minutes >= 90 ? `in ${Math.floor(minutes / 60)} hr` : `in ${minutes} min`,
+    countdown: `in ${formatCountdown(timeMs, now)}`,
+    clock,
     className: "countdown is-distant",
   };
 }
@@ -631,35 +636,25 @@ function nextBus(departures: readonly Departure[], times: number): NextBus | und
   return { head, rest: sameService.slice(1, Math.max(1, times)) };
 }
 
-/** Compact label for follow-up times: a countdown nearby, a clock later on. */
-function shortTimeLabel(timeMs: number, now = Date.now()): string {
-  const minutes = minutesUntil(timeMs, now);
-  if (minutes < 1) return "due";
-  if (minutes < 60) return `${minutes} min`;
-  return formatClock(timeMs);
-}
-
-/**
- * Follow-up times get their own line. Sharing the status line meant a live bus
- * with a delay and a stop count pushed them past the edge of the card, where
- * they were clipped mid-digit. Rendered even when empty, so a row keeps its
- * height as follow-ups come and go.
- */
-function renderFollowUps(rest: readonly Departure[]): HTMLElement {
-  const row = element("p", { className: "departure-then" });
-  if (rest.length === 0) return row;
-  row.append(element("span", { className: "then-label", text: "then" }));
-  rest.forEach((departure, position) => {
-    if (position > 0) row.append(separator());
-    row.append(
+/** Actual arrivals stay chronological; relative time is shown separately. */
+function renderArrivalTimes(head: Departure, rest: readonly Departure[]): HTMLElement {
+  const departures = [head, ...rest];
+  return element(
+    "p",
+    {
+      className: "arrival-times",
+      ariaLabel: `Arrival times: ${departures
+        .map((departure) => departureLabels(departure.timeMs).clock)
+        .join(", ")}`,
+    },
+    departures.map((departure, index) =>
       element("span", {
-        className: "then-time",
-        text: shortTimeLabel(departure.timeMs),
+        className: `arrival-time${index === 0 ? " is-next" : ""}`,
+        text: departureLabels(departure.timeMs).clock,
         dataset: { time: String(departure.timeMs) },
       }),
-    );
-  });
-  return row;
+    ),
+  );
 }
 
 function separator(): HTMLElement {
@@ -842,7 +837,7 @@ function departureNoteNodes(
   if (!departure.isLive) return [];
   const notes: Node[] = [element("span", { className: "note-live", text: "Live" })];
   const delay = formatDelay(departure.delaySec);
-  if (delay && labels.primary !== delay) {
+  if (delay && labels.countdown !== delay) {
     notes.push(
       element("span", {
         className: departure.delaySec > 0 ? "note-late" : "note-early",
@@ -873,6 +868,7 @@ function renderDeparture(group: NextBus): HTMLElement {
     departure.isLive ? departure.delaySec : undefined,
     now,
   );
+  const notes = departureNoteNodes(departure, labels);
 
   return element(
     "li",
@@ -889,30 +885,35 @@ function renderDeparture(group: NextBus): HTMLElement {
         ...(departure.routeColor ? { color: departure.routeColor } : {}),
       }),
       element("div", { className: "departure-copy" }, [
-        element("p", {
-          className: "headsign",
-          text: departure.headsign || `Route ${departure.routeShortName}`,
-        }),
-        // Always present, even when empty, so a row keeps its height when live
-        // information arrives or drops away.
-        element(
-          "p",
-          {
-            className: "departure-note",
-            dataset: {
-              live: String(departure.isLive),
-              delay: String(departure.delaySec),
-              stopsAway:
-                departure.stopsAway === undefined ? "" : String(departure.stopsAway),
-            },
-          },
-          withSeparators(departureNoteNodes(departure, labels)),
-        ),
-        renderFollowUps(group.rest),
-      ]),
-      element("div", { className: "departure-time" }, [
-        element("span", { className: labels.className, text: labels.primary }),
-        element("span", { className: "clock", text: labels.secondary }),
+        element("div", { className: "departure-summary" }, [
+          element("p", {
+            className: "headsign",
+            text: departure.headsign || `Route ${departure.routeShortName}`,
+          }),
+          element("span", {
+            className: labels.className,
+            text: labels.countdown,
+            ariaLabel: `Next bus ${labels.countdown}`,
+          }),
+        ]),
+        renderArrivalTimes(departure, group.rest),
+        notes.length > 0
+          ? element(
+              "p",
+              {
+                className: "departure-note",
+                dataset: {
+                  live: String(departure.isLive),
+                  delay: String(departure.delaySec),
+                  stopsAway:
+                    departure.stopsAway === undefined
+                      ? ""
+                      : String(departure.stopsAway),
+                },
+              },
+              withSeparators(notes),
+            )
+          : undefined,
       ]),
     ],
   );
@@ -928,7 +929,7 @@ function alertLeadFor(saved: SavedStop): number {
 /**
  * The one place alert state is turned into words. Tooltips, labels, and the
  * confirmation message all read from here so they cannot drift apart, and
- * every message names its stop: alerts are per stop, never global.
+ * every message names its stop and route: alerts are per pair, never global.
  */
 function describeAlerts(
   stopName: string,
@@ -943,12 +944,13 @@ function describeAlerts(
 function renderStopTools(saved: SavedStop): HTMLElement {
   const tools = element("div", { className: "stop-tools" });
   const canReorder = canReorderStop(saved);
+  const entryName = savedEntryLabel(saved);
   const grip = button(
     "tool-button stop-grip",
     {
       ariaLabel: canReorder
-        ? `Reorder ${saved.stopName}; use the arrow keys to move`
-        : `${saved.stopName} is ordered automatically as the closest stop`,
+        ? `Reorder ${entryName}; use the arrow keys to move`
+        : `${entryName} is ordered automatically as the closest stop`,
       title: canReorder
         ? "Drag to reorder, or use the arrow keys"
         : "Closest stop is ordered automatically",
@@ -965,14 +967,14 @@ function renderStopTools(saved: SavedStop): HTMLElement {
   if (proBuild) {
     const enabled = Boolean(saved.alertsEnabled) && proUnlocked();
     const leadMinutes = alertLeadFor(saved);
-    const { setting } = describeAlerts(saved.stopName, enabled, leadMinutes);
+    const { setting } = describeAlerts(entryName, enabled, leadMinutes);
 
     // Lead time first, then the bell it belongs to: the pair reads left to
     // right as "5 min before · alerts on". Always rendered so switching alerts
     // on or off never resizes the card.
     const select = element("select", {
       className: "lead-select",
-      ariaLabel: `Alert lead time for ${saved.stopName}`,
+      ariaLabel: `Alert lead time for ${entryName}`,
       dataset: { focusKey: `lead:${saved.id}` },
     });
     for (const minutes of ALERT_LEAD_OPTIONS) {
@@ -993,7 +995,7 @@ function renderStopTools(saved: SavedStop): HTMLElement {
       {
         // Stable label plus aria-pressed, so the control reads the same way
         // whichever state it is in.
-        ariaLabel: `Arrival alerts for ${saved.stopName}`,
+        ariaLabel: `Arrival alerts for ${entryName}`,
         title: setting,
         dataset: { focusKey: `bell:${saved.id}` },
         onClick: () => void toggleAlerts(saved),
@@ -1008,8 +1010,8 @@ function renderStopTools(saved: SavedStop): HTMLElement {
     button(
       "tool-button tool-remove is-danger",
       {
-        ariaLabel: `Remove ${saved.stopName}`,
-        title: "Remove this stop",
+        ariaLabel: `Remove ${entryName}`,
+        title: "Remove this stop and route",
         dataset: { focusKey: `remove:${saved.id}` },
         onClick: () => void removeStop(saved),
       },
@@ -1030,190 +1032,20 @@ function savedRouteLabel(saved: SavedStop): string | undefined {
   return known === saved.routeId ? (saved.routeShortName ?? known) : known;
 }
 
-interface DirectionChoice {
-  directionId: DirectionId;
-  headsign: string;
-  label: string;
-}
-
-interface RouteChoice {
-  routeId: string;
-  directionId?: DirectionId;
-  directionHeadsign?: string;
-  label: string;
-  name: string;
-}
-
-function directionChoicesAt(stopId: string, routeId: string): DirectionChoice[] {
-  if (!state.index) return [];
-  return DIRECTION_IDS.flatMap((directionId) => {
-    const pattern = state.index?.patterns.get(patternKey(routeId, directionId));
-    if (!pattern || !pattern.stopIds.includes(stopId)) return [];
-    const headsign = pattern.headsigns.slice(0, 2).join(" / ");
-    return [
-      {
-        directionId,
-        headsign,
-        label: headsign ? `To ${headsign}` : `Direction ${directionId}`,
-      },
-    ];
-  });
-}
-
-function routeChoicesAt(stopId: string, routeIds: readonly string[]): RouteChoice[] {
-  return routeIds.flatMap((routeId) => {
-    const route = routeFor(routeId);
-    const shortName = route?.shortName ?? routeId;
-    const directions = directionChoicesAt(stopId, routeId);
-    if (directions.length <= 1) {
-      const direction = directions[0];
-      if (direction) {
-        return [
-          {
-            routeId,
-            directionId: direction.directionId,
-            directionHeadsign: direction.headsign || undefined,
-            label: `${shortName} · ${direction.label}`,
-            name: `Route ${shortName}, ${direction.label}`,
-          },
-        ];
-      }
-      return [
-        {
-          routeId,
-          label: shortName,
-          name: `Route ${shortName}`,
-        },
-      ];
-    }
-    return [
-      {
-        routeId,
-        label: `${shortName} · Any direction`,
-        name: `Route ${shortName}, any direction`,
-      },
-      ...directions.map((direction) => ({
-        routeId,
-        directionId: direction.directionId,
-        directionHeadsign: direction.headsign || undefined,
-        label: `${shortName} · ${direction.label}`,
-        name: `Route ${shortName}, ${direction.label}`,
-      })),
-    ];
-  });
-}
-
-function routeChoiceKey(choice: Pick<RouteChoice, "routeId" | "directionId">): string {
-  return `${choice.routeId}|${choice.directionId ?? ""}`;
-}
-
-function savedChoiceKey(saved: SavedStop | undefined): string {
-  return `${saved?.routeId ?? ""}|${saved?.directionId ?? ""}`;
-}
-
-function savedDirectionLabel(saved: SavedStop): string | undefined {
-  if (!saved.routeId || !saved.directionId) return undefined;
-  const current = directionChoicesAt(saved.stopId, saved.routeId).find(
-    (choice) => choice.directionId === saved.directionId,
-  );
-  if (current) return current.label;
-  return directionLabel(saved.directionId, saved.directionHeadsign);
-}
-
-function directionLabel(
-  directionId: DirectionId | undefined,
-  headsign?: string,
-): string | undefined {
-  if (!directionId) return undefined;
-  return headsign ? `To ${headsign}` : `Direction ${directionId}`;
-}
-
-function savedRouteDescription(saved: SavedStop | undefined): string | undefined {
-  if (!saved) return undefined;
+function savedEntryLabel(saved: SavedStop): string {
   const route = savedRouteLabel(saved);
-  if (!route) return undefined;
-  const direction = savedDirectionLabel(saved);
-  if (direction) return `${route} · ${direction}`;
-  if (saved.routeId && directionChoicesAt(saved.stopId, saved.routeId).length > 1) {
-    return `${route} · Any direction`;
-  }
-  return route;
-}
-
-function routeChoiceForSaved(saved: SavedStop | undefined): RouteChoice | undefined {
-  if (!saved?.routeId) return undefined;
-  const label = savedRouteDescription(saved) ?? saved.routeId;
-  return {
-    routeId: saved.routeId,
-    ...(saved.directionId ? { directionId: saved.directionId } : {}),
-    ...(saved.directionHeadsign ? { directionHeadsign: saved.directionHeadsign } : {}),
-    label,
-    name: label,
-  };
-}
-
-const ANY_ROUTE_VALUE = "__any_route__";
-
-function routeSelectionChoicesAt(
-  stopId: string,
-  routeIds: readonly string[],
-  saved?: SavedStop,
-): RouteChoice[] {
-  const choices = routeChoicesAt(stopId, routeIds);
-  const savedChoice = routeChoiceForSaved(saved);
-  if (
-    savedChoice &&
-    !choices.some((choice) => routeChoiceKey(choice) === routeChoiceKey(savedChoice))
-  ) {
-    choices.unshift(savedChoice);
-  }
-  return choices;
-}
-
-function anyRouteChoice(): RouteChoice {
-  return {
-    routeId: "",
-    label: "Any route",
-    name: "Every route",
-  };
-}
-
-/** Keep the same compact native selector on every saved stop, even for one route. */
-function renderStopRouteSelect(saved: SavedStop): HTMLSelectElement {
-  const routeIds = state.index?.routeIdsByStop.get(saved.stopId) ?? [];
-  const choices = routeSelectionChoicesAt(saved.stopId, routeIds, saved);
-  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
-  const select = element("select", {
-    className: "stop-route-select",
-    ariaLabel: `Route and direction followed at ${saved.stopName}`,
-    dataset: { focusKey: `route-select:${saved.id}` },
-  });
-  select.append(new Option(anyRouteChoice().label, ANY_ROUTE_VALUE));
-  for (const choice of choices) {
-    select.append(new Option(choice.label, routeChoiceKey(choice)));
-  }
-  select.value = saved.routeId ? savedChoiceKey(saved) : ANY_ROUTE_VALUE;
-  select.addEventListener("change", () => {
-    const choice = byValue.get(select.value);
-    void changeStopRoute(
-      saved,
-      choice?.routeId ?? "",
-      choice?.directionId,
-      choice?.directionHeadsign,
-    );
-  });
-  return select;
+  return route ? `Route ${route} at ${saved.stopName}` : saved.stopName;
 }
 
 function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
   if (board.scheduleExpired) {
     return "The saved timetable does not cover today. Reload the schedule from settings.";
   }
-  const route = savedRouteDescription(saved);
+  const route = savedRouteLabel(saved);
   if (route) {
     // Naming the route matters here: other buses may well be running, and
     // "out of service" on its own would look like the whole stop was dead.
-    return `No departures for ${route} in the next day. Other buses may still serve this stop.`;
+    return `No departures for route ${route} in the next day. Other buses may still serve this stop.`;
   }
   return "No departures in the next day. This stop may be out of service.";
 }
@@ -1238,16 +1070,11 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
   });
   card.setAttribute("role", "listitem");
 
-  // Keep the stop name and metadata readable before the controls. Metadata may
-  // wrap when a narrow panel cannot fit the distance; the follow selector is
-  // placed in its own row below this block so neither set of facts is clipped.
+  // A card is one stop + route pair, so both facts live together in its heading.
   const meta = element("div", { className: "stop-meta" }, [
     element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
   ]);
-  const routeSelect = renderStopRouteSelect(saved);
-  if (isNearest) {
-    meta.append(element("span", { className: "stop-tag", text: "Closest" }));
-  }
+  const route = savedRouteLabel(saved);
   const distance = state.distancesById?.get(saved.id);
   if (distance !== undefined) {
     meta.append(
@@ -1257,6 +1084,9 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
         title: formatWalkTime(distance),
       }),
     );
+  }
+  if (isNearest) {
+    meta.append(element("span", { className: "stop-tag", text: "Closest" }));
   }
 
   card.append(
@@ -1268,12 +1098,6 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       renderStopTools(saved),
     ]),
   );
-  card.append(
-    element("div", { className: "stop-route-row" }, [
-      element("span", { className: "stop-route-label", text: "Follow" }),
-      routeSelect,
-    ]),
-  );
 
   const bus = nextBus(board.departures, state.settings.departuresPerStop);
   if (bus) {
@@ -1281,7 +1105,9 @@ function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
       "ul",
       {
         className: "departures",
-        ariaLabel: `Next bus from ${saved.stopName}`,
+        ariaLabel: route
+          ? `Next route ${route} bus from ${saved.stopName}`
+          : `Next bus from ${saved.stopName}`,
       },
       [renderDeparture(bus)],
     );
@@ -1349,15 +1175,14 @@ function tickCountdowns(): void {
     if (!Number.isFinite(timeMs)) continue;
     const delaySec = Number(node.dataset.delay);
     const countdown = node.querySelector<HTMLElement>(".countdown");
-    const clock = node.querySelector<HTMLElement>(".clock");
-    if (!countdown || !clock) continue;
+    if (!countdown) continue;
     const labels = departureLabels(
       timeMs,
       Number.isFinite(delaySec) ? delaySec : undefined,
     );
-    countdown.textContent = labels.primary;
+    countdown.textContent = labels.countdown;
     countdown.className = labels.className;
-    clock.textContent = labels.secondary;
+    countdown.setAttribute("aria-label", `Next bus ${labels.countdown}`);
 
     const note = node.querySelector<HTMLElement>(".departure-note");
     if (note?.dataset.live === "true") {
@@ -1380,9 +1205,9 @@ function tickCountdowns(): void {
       );
     }
   }
-  for (const node of queryAll<HTMLElement>(".then-time[data-time]")) {
+  for (const node of queryAll<HTMLElement>(".arrival-time[data-time]")) {
     const timeMs = Number(node.dataset.time);
-    if (Number.isFinite(timeMs)) node.textContent = shortTimeLabel(timeMs);
+    if (Number.isFinite(timeMs)) node.textContent = departureLabels(timeMs).clock;
   }
   if (state.realtimeAt && !state.flash) {
     el.feedDetail.textContent = state.realtimeFailed
@@ -1399,8 +1224,10 @@ function tickCountdowns(): void {
  * Rendering: stop picker
  * ------------------------------------------------------------------ */
 
-function savedStopFor(stopId: string): SavedStop | undefined {
-  return state.savedStops.find((saved) => saved.stopId === stopId);
+function savedStopFor(stopId: string, routeId: string): SavedStop | undefined {
+  return state.savedStops.find(
+    (saved) => saved.stopId === stopId && saved.routeId === routeId,
+  );
 }
 
 function routeFor(routeId: string): Route | undefined {
@@ -1409,134 +1236,90 @@ function routeFor(routeId: string): Route | undefined {
 }
 
 /** Routes serving a stop, in the feed's display order. */
-function routesAt(stop: Stop, routeIds?: string[]): string[] {
-  return routeIds ?? state.index?.routeIdsByStop.get(stop.id) ?? [];
+function routesAt(stop: Stop): string[] {
+  return state.index?.routeIdsByStop.get(stop.id) ?? [];
 }
 
 interface ResultItemOptions {
   distanceMeters?: number;
-  routeIds?: string[];
-  /** The route being browsed in the route tab, if any. */
-  browsingRouteId?: string;
-  /** The direction being browsed in the route tab, if any. */
-  browsingDirectionId?: DirectionId;
+  showRouteBadge?: boolean;
 }
 
-/**
- * The route/direction a press on the row itself saves: the one being browsed if
- * one is selected, otherwise the first choice at the stop.
- *
- * Choosing a route and direction and then walking its stops is a rider saying
- * which bus they want, so the row takes them at their word rather than reverting
- * to whichever choice the feed happens to list first. "Any" is never the default
- * — someone at a stop is waiting for a bus, not for all of them — but it stays one
- * press away.
- */
-function defaultRouteChoice(
-  choices: readonly RouteChoice[],
-  browsingRouteId?: string,
-  browsingDirectionId?: DirectionId,
-): RouteChoice | undefined {
-  if (browsingRouteId && browsingDirectionId) {
-    const exact = choices.find(
-      (choice) =>
-        choice.routeId === browsingRouteId && choice.directionId === browsingDirectionId,
-    );
-    if (exact) return exact;
-  }
-  if (browsingRouteId) {
-    const route = choices.find((choice) => choice.routeId === browsingRouteId);
-    if (route) return route;
-  }
-  return choices[0];
-}
-
-/** A stop in the picker with one compact route/destination selector. */
-function resultItem(stop: Stop, options: ResultItemOptions): HTMLElement {
-  const routes = routesAt(stop, options.routeIds);
-  const saved = savedStopFor(stop.id);
-  const choices = routeSelectionChoicesAt(stop.id, routes, saved);
-  const byValue = new Map(choices.map((choice) => [routeChoiceKey(choice), choice]));
-  const any = anyRouteChoice();
-  const fallback = defaultRouteChoice(
-    choices,
-    options.browsingRouteId,
-    options.browsingDirectionId,
-  );
-
+/** One explicit stop + route result with a single idempotent action. */
+function resultItem(
+  stop: Stop,
+  routeId: string,
+  options: ResultItemOptions = {},
+): HTMLElement {
+  const route = routeFor(routeId);
+  const shortName = route?.shortName ?? routeId;
+  const saved = savedStopFor(stop.id, routeId);
+  const atLimit = !saved && state.savedStops.length >= MAX_SAVED_STOPS;
   const meta = element("div", { className: "result-meta" }, [
     element("span", { text: `Stop ${stop.code}` }),
     options.distanceMeters !== undefined
       ? element("span", { text: formatDistance(options.distanceMeters) })
       : undefined,
-    saved
-      ? element("span", {
-          className: "result-added",
-          text: "Added",
-          title: "This stop is already in your saved stops",
-        })
-      : undefined,
   ]);
-
-  const select = element("select", {
-    className: "result-select",
-    ariaLabel: `Route and direction to follow at ${stop.name}`,
-    dataset: { focusKey: `result-select:${stop.id}` },
+  const add = button(`result-add${saved ? " is-added" : ""}`, {
+    text: saved ? "Added" : atLimit ? "Limit" : "Add",
+    ariaLabel: saved
+      ? `Route ${shortName} at ${stop.name} is already added`
+      : atLimit
+        ? `Saved limit reached; cannot add route ${shortName} at ${stop.name}`
+        : `Add route ${shortName} at ${stop.name}`,
+    title: saved
+      ? "This stop and route are already saved"
+      : atLimit
+        ? `You can save up to ${MAX_SAVED_STOPS} stop and route pairs`
+        : `Add route ${shortName}`,
+    dataset: { focusKey: `result-add:${stop.id}:${routeId}` },
+    ...(!saved && !atLimit ? { onClick: () => void saveStop(stop, routeId) } : {}),
   });
-  if (!saved) select.append(new Option("Choose route and destination…", ""));
-  select.append(new Option(any.label, ANY_ROUTE_VALUE));
-  for (const choice of choices) {
-    select.append(new Option(choice.label, routeChoiceKey(choice)));
-  }
-  select.value = saved
-    ? saved.routeId
-      ? savedChoiceKey(saved)
-      : ANY_ROUTE_VALUE
-    : options.browsingRouteId && fallback
-      ? routeChoiceKey(fallback)
-      : "";
-  select.addEventListener("change", () => {
-    if (!select.value) return;
-    const choice =
-      select.value === ANY_ROUTE_VALUE ? any : byValue.get(select.value);
-    if (!choice) return;
-    void saveStop(
-      stop,
-      choice.routeId || undefined,
-      choice.directionId,
-      choice.directionHeadsign,
-    );
-  });
+  add.disabled = Boolean(saved) || atLimit;
 
-  const choiceRow = element("div", { className: "result-choice-row" }, [
-    element("span", { className: "result-choice-label", text: "Follow" }),
-    select,
-  ]);
-
-  const entry = element("div", { className: "result-entry" }, [
-    element("p", { className: "result-name", text: stop.name, title: stop.name }),
-    meta,
-    choiceRow,
-  ]);
-
-  // In Browse routes, the route and direction are already explicit in the tab.
-  // Keep the row shortcut there, while Search always makes the selection in the
-  // one visible control so a destination is never chosen by accident.
-  if (options.browsingRouteId && fallback) {
-    entry.classList.add("is-pressable");
-    entry.title = `Save ${fallback.name} at ${stop.name}`;
-    entry.addEventListener("click", (event) => {
-      if ((event.target as HTMLElement).closest("select")) return;
-      void saveStop(
-        stop,
-        fallback?.routeId,
-        fallback?.directionId,
-        fallback?.directionHeadsign,
-      );
+  let badge: HTMLElement | undefined;
+  if (options.showRouteBadge !== false) {
+    badge = routeBadge({
+      shortName,
+      ...(route?.color ? { color: route.color } : {}),
     });
+    badge.classList.add("result-route-badge");
+    badge.title = route?.longName
+      ? `Route ${shortName} · ${route.longName}`
+      : `Route ${shortName}`;
   }
 
-  return element("li", { className: "result-row" }, [entry]);
+  return element("li", { className: "result-row" }, [
+    element("div", { className: "result-entry" }, [
+      badge,
+      element("div", { className: "result-copy" }, [
+        element("p", { className: "result-name", text: stop.name, title: stop.name }),
+        meta,
+      ]),
+      add,
+    ]),
+  ]);
+}
+
+function resultItemsForStops(
+  entries: readonly { stop: Stop; distanceMeters?: number }[],
+  limit = SEARCH_RESULT_LIMIT,
+): HTMLElement[] {
+  const items: HTMLElement[] = [];
+  for (const entry of entries) {
+    for (const routeId of routesAt(entry.stop)) {
+      items.push(
+        resultItem(entry.stop, routeId, {
+          ...(entry.distanceMeters !== undefined
+            ? { distanceMeters: entry.distanceMeters }
+            : {}),
+        }),
+      );
+      if (items.length >= limit) return items;
+    }
+  }
+  return items;
 }
 
 function searchStops(term: string): Stop[] {
@@ -1576,7 +1359,13 @@ function renderSearchPane(): void {
       el.searchEmpty.textContent = `No stops match “${state.searchTerm.trim()}”.`;
       return;
     }
-    el.searchResults.append(...results.map((stop) => resultItem(stop, {})));
+    const items = resultItemsForStops(results.map((stop) => ({ stop })));
+    if (items.length === 0) {
+      el.searchEmpty.hidden = false;
+      el.searchEmpty.textContent = "No routes serve those stops.";
+      return;
+    }
+    el.searchResults.append(...items);
     return;
   }
   if (state.nearbyStops) {
@@ -1586,8 +1375,11 @@ function renderSearchPane(): void {
       return;
     }
     el.searchResults.append(
-      ...state.nearbyStops.map((entry) =>
-        resultItem(entry.stop, { distanceMeters: entry.meters }),
+      ...resultItemsForStops(
+        state.nearbyStops.map((entry) => ({
+          stop: entry.stop,
+          distanceMeters: entry.meters,
+        })),
       ),
     );
   }
@@ -1604,20 +1396,24 @@ function renderRoutePane(): void {
     }
   }
   el.routeSelect.value = state.selectedRouteId;
+  const directions = DIRECTION_IDS.filter((directionId) =>
+    state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
+  );
+  if (!directions.includes(state.selectedDirectionId as DirectionId)) {
+    state.selectedDirectionId = directions[0] ?? "";
+  }
 
-  const directions = state.selectedRouteId
-    ? DIRECTION_IDS.filter((directionId) =>
-        state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
-      )
-    : [];
-  el.directionChips.hidden = directions.length === 0;
+  el.directionChips.hidden = directions.length <= 1;
   el.directionChips.replaceChildren();
   for (const directionId of directions) {
-    const pattern = state.index.patterns.get(patternKey(state.selectedRouteId, directionId));
+    const pattern = state.index.patterns.get(
+      patternKey(state.selectedRouteId, directionId),
+    );
     const headsign = pattern?.headsigns.slice(0, 2).join(" / ");
     const label = headsign ? `To ${headsign}` : `Direction ${directionId}`;
     const chip = button("chip", {
       text: label,
+      title: label,
       onClick: () => {
         state.selectedDirectionId = directionId;
         render();
@@ -1628,29 +1424,60 @@ function renderRoutePane(): void {
     el.directionChips.append(chip);
   }
 
+  const filteringNearby = state.routeNearbyStops !== undefined;
+  el.routeNearButton.textContent = state.locatingRouteNearby
+    ? "Finding…"
+    : filteringNearby
+      ? "Show all"
+      : "Near me";
+  el.routeNearButton.disabled = !state.selectedRouteId || state.locatingRouteNearby;
+  el.routeNearButton.setAttribute("aria-pressed", String(filteringNearby));
+
   el.routeStops.replaceChildren();
+  el.routeEmpty.hidden = true;
   if (!state.selectedRouteId || !state.selectedDirectionId) return;
+  if (state.locatingRouteNearby) {
+    el.routeEmpty.hidden = false;
+    el.routeEmpty.textContent = "Finding this route near you…";
+    return;
+  }
+
   const pattern = state.index.patterns.get(
     patternKey(state.selectedRouteId, state.selectedDirectionId),
   );
-  if (!pattern) return;
+  const stopIds = [...new Set(pattern?.stopIds ?? [])];
   const stopsById = new Map(state.index.stops.map((stop) => [stop.id, stop]));
-  el.routeStops.append(
-    ...pattern.stopIds.flatMap((stopId) => {
-      const stop = stopsById.get(stopId);
-      if (!stop) return [];
-      const routeIds = state.index?.routeIdsByStop.get(stopId) ?? [];
-      // Browsing a route is a rider naming the bus they want, so it becomes what
-      // a press on the row saves rather than the feed's first route at the stop.
-      return [
-        resultItem(stop, {
-          routeIds,
-          browsingRouteId: state.selectedRouteId,
-          browsingDirectionId: state.selectedDirectionId || undefined,
-        }),
-      ];
-    }),
+  const nearbyByStop = new Map(
+    (state.routeNearbyStops ?? []).map((entry) => [entry.stop.id, entry.meters]),
   );
+  const visibleStopIds = filteringNearby
+    ? stopIds
+        .filter((stopId) => nearbyByStop.has(stopId))
+        .sort(
+          (left, right) =>
+            (nearbyByStop.get(left) ?? Infinity) -
+            (nearbyByStop.get(right) ?? Infinity),
+        )
+    : stopIds;
+  const items = visibleStopIds.flatMap((stopId) => {
+    const stop = stopsById.get(stopId);
+    if (!stop) return [];
+    const distanceMeters = nearbyByStop.get(stopId);
+    return [
+      resultItem(stop, state.selectedRouteId, {
+        showRouteBadge: false,
+        ...(distanceMeters !== undefined ? { distanceMeters } : {}),
+      }),
+    ];
+  });
+  if (items.length === 0) {
+    el.routeEmpty.hidden = false;
+    el.routeEmpty.textContent = filteringNearby
+      ? "No stops for this route and direction are within 2 km."
+      : "No stops found for this route and direction.";
+    return;
+  }
+  el.routeStops.append(...items);
 }
 
 function renderPicker(): void {
@@ -1658,7 +1485,7 @@ function renderPicker(): void {
   el.pickerToggle.setAttribute("aria-expanded", String(state.pickerOpen));
   el.pickerBody.hidden = !state.pickerOpen;
   el.pickerToggle.querySelector(".picker-toggle-label")!.textContent = atLimit
-    ? `Saved stop limit reached (${MAX_SAVED_STOPS})`
+    ? `Saved limit reached (${MAX_SAVED_STOPS})`
     : "Add a stop";
   el.pickerToggle.disabled = atLimit && !state.pickerOpen;
   if (!state.pickerOpen) return;
@@ -1891,81 +1718,32 @@ async function afterStopsChanged(stops: SavedStop[]): Promise<void> {
   }
 }
 
-/**
- * Saves a stop for one route, or moves an already-saved stop onto that route.
- *
- * A stop is one place and gets one card, so pressing a route at a stop that is
- * already on the list points that card at the new route rather than adding a
- * second one beside it.
- */
-async function saveStop(
-  stop: Stop,
-  routeId?: string,
-  directionId?: DirectionId,
-  directionHeadsign?: string,
-): Promise<void> {
-  const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
-  const moved = Boolean(savedStopFor(stop.id));
+/** Saves one explicit stop + route pair and leaves the picker open for more. */
+async function saveStop(stop: Stop, routeId: string): Promise<void> {
+  const shortName = routeFor(routeId)?.shortName ?? routeId;
+  if (savedStopFor(stop.id, routeId)) {
+    flashStatus(`Already added · route ${shortName} at ${stop.name}`);
+    return;
+  }
   try {
     const stops = await addSavedStop({
       stopId: stop.id,
       stopCode: stop.code,
       stopName: stop.name,
-      ...(routeId ? { routeId } : {}),
-      ...(shortName ? { routeShortName: shortName } : {}),
-      ...(routeId && directionId ? { directionId } : {}),
-      ...(routeId && directionId && directionHeadsign
-        ? { directionHeadsign }
-        : {}),
+      routeId,
+      routeShortName: shortName,
     });
-    state.pickerOpen = false;
-    state.searchTerm = "";
-    el.stopSearch.value = "";
     await afterStopsChanged(stops);
-    const direction = routeId ? directionLabel(directionId, directionHeadsign) : undefined;
-    const route = routeId
-      ? `route ${shortName ?? routeId}${direction ? ` · ${direction}` : ""}`
-      : "every route";
-    flashStatus(
-      moved ? `Now following ${route} · ${stop.name}` : `Saved · ${route} at ${stop.name}`,
-    );
+    flashStatus(`Saved · route ${shortName} at ${stop.name}`);
   } catch (error) {
-    flashStatus(errorMessage(error, "Could not save that stop."), "error");
-  }
-}
-
-/** Changes which route/direction a saved card follows, or widens it back to every route. */
-async function changeStopRoute(
-  saved: SavedStop,
-  routeId: string,
-  directionId?: DirectionId,
-  directionHeadsign?: string,
-): Promise<void> {
-  try {
-    const shortName = routeId ? routeFor(routeId)?.shortName : undefined;
-    const stops = await setStopRoute(
-      saved.id,
-      routeId || undefined,
-      shortName,
-      routeId ? directionId : undefined,
-      routeId ? directionHeadsign : undefined,
-    );
-    await afterStopsChanged(stops);
-    const direction = routeId ? directionLabel(directionId, directionHeadsign) : undefined;
-    flashStatus(
-      routeId
-        ? `Following route ${shortName ?? routeId}${direction ? ` · ${direction}` : ""} · ${saved.stopName}`
-        : `Following every route · ${saved.stopName}`,
-    );
-  } catch (error) {
-    flashStatus(errorMessage(error, "Could not change that route."), "error");
+    flashStatus(errorMessage(error, "Could not save that stop and route."), "error");
   }
 }
 
 async function removeStop(saved: SavedStop): Promise<void> {
   const stops = await removeSavedStop(saved.id);
   await afterStopsChanged(stops);
-  showToast(`${saved.stopName} removed`, {
+  showToast(`${savedEntryLabel(saved)} removed`, {
     label: "Undo",
     run: () => {
       void restoreSavedStop(saved).then(afterStopsChanged);
@@ -1998,7 +1776,7 @@ async function toggleAlerts(saved: SavedStop): Promise<void> {
   const leadMinutes = alertLeadFor(saved);
   const stops = await setStopAlerts(saved.id, enabling, leadMinutes);
   await afterStopsChanged(stops);
-  flashStatus(describeAlerts(saved.stopName, enabling, leadMinutes).confirmation);
+  flashStatus(describeAlerts(savedEntryLabel(saved), enabling, leadMinutes).confirmation);
 }
 
 /** Changing the lead time confirms itself the same way toggling does. */
@@ -2009,7 +1787,7 @@ async function updateAlertLead(saved: SavedStop, leadMinutes: number): Promise<v
   const enabled = Boolean(saved.alertsEnabled);
   const stops = await setStopAlerts(saved.id, enabled, leadMinutes);
   await afterStopsChanged(stops);
-  flashStatus(describeAlerts(saved.stopName, enabled, leadMinutes).confirmation);
+  flashStatus(describeAlerts(savedEntryLabel(saved), enabled, leadMinutes).confirmation);
 }
 
 async function reloadSchedule(): Promise<void> {
@@ -2025,6 +1803,32 @@ async function reloadSchedule(): Promise<void> {
   if (!state.scheduleError) flashStatus("Timetable reloaded");
 }
 
+/** Bring nearby controls and the first results into the popup's main scroll area. */
+function scrollPickerIntoView(): void {
+  window.requestAnimationFrame(() => {
+    const activePane = state.pickerTab === "search" ? el.paneSearch : el.paneRoute;
+    activePane.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  });
+}
+
+async function readNearbyPosition(): Promise<GeolocationPosition> {
+  const position = await getCurrentPosition();
+  await setLocationConsent(true);
+  // Accuracy travels with the position: without it a kilometre-wide fix would
+  // later be treated as pinpoint when picking the closest saved entry.
+  await saveLastLocation(
+    position.coords.latitude,
+    position.coords.longitude,
+    position.coords.accuracy,
+  );
+  return position;
+}
+
 async function findNearbyStops(): Promise<void> {
   state.pickerOpen = true;
   state.pickerTab = "search";
@@ -2032,16 +1836,9 @@ async function findNearbyStops(): Promise<void> {
   state.searchTerm = "";
   el.stopSearch.value = "";
   render();
+  scrollPickerIntoView();
   try {
-    const position = await getCurrentPosition();
-    await setLocationConsent(true);
-    // Accuracy travels with the position: without it a kilometre-wide fix would
-    // later be treated as pinpoint when picking the closest stop.
-    await saveLastLocation(
-      position.coords.latitude,
-      position.coords.longitude,
-      position.coords.accuracy,
-    );
+    const position = await readNearbyPosition();
     state.nearbyStops = state.index
       ? nearestStops(
           state.index.stops,
@@ -2061,6 +1858,38 @@ async function findNearbyStops(): Promise<void> {
   } finally {
     state.locatingNearby = false;
     render();
+    scrollPickerIntoView();
+  }
+}
+
+async function findNearbyRouteStops(): Promise<void> {
+  if (!state.selectedRouteId) return;
+  state.locatingRouteNearby = true;
+  render();
+  scrollPickerIntoView();
+  try {
+    const position = await readNearbyPosition();
+    state.routeNearbyStops = state.index
+      ? nearestStops(
+          state.index.stops,
+          position.coords.latitude,
+          position.coords.longitude,
+          state.index.stops.length,
+        )
+      : [];
+    await refreshLocation();
+  } catch (error) {
+    state.routeNearbyStops = undefined;
+    flashStatus(
+      isLocationDenied(error)
+        ? "Location access was declined."
+        : errorMessage(error, "Could not find your location."),
+      "error",
+    );
+  } finally {
+    state.locatingRouteNearby = false;
+    render();
+    scrollPickerIntoView();
   }
 }
 
@@ -2225,11 +2054,20 @@ el.emptySearchButton.addEventListener("click", () => {
 
 el.routeSelect.addEventListener("change", () => {
   state.selectedRouteId = el.routeSelect.value;
-  const directions = DIRECTION_IDS.filter((directionId) =>
-    state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
-  );
-  state.selectedDirectionId = directions.length === 1 ? directions[0] : "";
+  state.selectedDirectionId =
+    DIRECTION_IDS.find((directionId) =>
+      state.index?.patterns.has(patternKey(state.selectedRouteId, directionId)),
+    ) ?? "";
   render();
+});
+
+el.routeNearButton.addEventListener("click", () => {
+  if (state.routeNearbyStops !== undefined) {
+    state.routeNearbyStops = undefined;
+    render();
+    return;
+  }
+  void findNearbyRouteStops();
 });
 
 el.themeGroup.addEventListener("click", (event) => {

@@ -44,8 +44,7 @@ prediction is never quietly presented as a promise.
 
 Both builds include:
 
-- Up to twelve saved stops. Each stop follows one route, or whichever bus comes next
-  if that is what you want.
+- Up to twelve saved stop-and-route pairs, with duplicate pairs prevented.
 - The soonest departure and the two after it, as a countdown inside the hour and a
   clock time beyond it.
 - Times marked **Live** come from the bus. Everything else is the published schedule,
