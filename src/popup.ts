@@ -15,7 +15,6 @@ import {
   formatDistance,
   formatFreshness,
   formatOverdueDelay,
-  formatWalkTime,
   formatWeekday,
   minutesUntil,
   routeBadgeColor,
@@ -54,7 +53,6 @@ import {
   restoreSavedStop,
   saveSettings,
   setStopAlerts,
-  updateSavedStop,
 } from "./storage";
 import { serviceDateKey } from "./time";
 import {
@@ -93,7 +91,6 @@ const cardAnimationTimers = new Map<string, number>();
 
 const el = {
   root: document.documentElement,
-  topbarAddButton: query<HTMLButtonElement>("#topbar-add-button"),
   planButton: query<HTMLButtonElement>("#plan-button"),
   settingsButton: query<HTMLButtonElement>("#settings-button"),
   refreshButton: query<HTMLButtonElement>("#refresh-button"),
@@ -849,8 +846,6 @@ function separator(): HTMLElement {
  * Drag-and-drop reorder
  * ------------------------------------------------------------------ */
 
-let dragStopId: string | undefined;
-
 function autoOrderActive(): boolean {
   return (
     proUnlocked() &&
@@ -864,80 +859,81 @@ function canReorderStop(saved: SavedStop): boolean {
   return !(autoOrderActive() && saved.id === state.nearestSavedId);
 }
 
-/** Keeps the closest stop pinned while reordering the other visible cards. */
-function canonicalOrderForDisplay(
-  displayed: readonly SavedStop[],
-  pinnedNearestId?: string,
-): SavedStop[] {
-  if (!pinnedNearestId || !state.savedStops.some((stop) => stop.id === pinnedNearestId)) {
-    return [...displayed];
+/** The home screen reorders physical stops as a unit, even though storage
+ * remains one entry per saved route/destination. */
+function savedStopGroupsForOrder(): SavedStop[][] {
+  const groups = new Map<string, SavedStop[]>();
+  for (const saved of displayOrder()) {
+    const group = groups.get(saved.stopId);
+    if (group) group.push(saved);
+    else groups.set(saved.stopId, [saved]);
   }
-  const remaining = displayed.filter((stop) => stop.id !== pinnedNearestId);
-  const canonical: SavedStop[] = [];
-  let nextRemaining = 0;
-  for (const stop of state.savedStops) {
-    if (stop.id === pinnedNearestId) {
-      canonical.push(stop);
-      continue;
-    }
-    const replacement = remaining[nextRemaining++];
-    if (replacement) canonical.push(replacement);
-  }
-  return canonical.length === state.savedStops.length ? canonical : [...displayed];
+  return [...groups.values()];
 }
 
-async function persistDisplayOrder(
-  displayed: readonly SavedStop[],
-  pinnedNearestId?: string,
-): Promise<void> {
-  const canonical = canonicalOrderForDisplay(displayed, pinnedNearestId);
-  const stops = await reorderSavedStops(canonical.map((stop) => stop.id));
+function groupCanReorder(group: readonly SavedStop[]): boolean {
+  return group.every((saved) => canReorderStop(saved));
+}
+
+async function persistSavedStopGroups(groups: readonly (readonly SavedStop[])[]): Promise<void> {
+  const ids = groups.flatMap((group) => group.map((saved) => saved.id));
+  const stops = await reorderSavedStops(ids);
   await afterStopsChanged(stops);
   flashStatus("Stop order updated");
 }
 
-function onGripKeyDown(event: KeyboardEvent, saved: SavedStop): void {
+function onGroupGripKeyDown(event: KeyboardEvent, stopId: string): void {
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
   event.preventDefault();
-  if (!canReorderStop(saved)) {
+  const groups = savedStopGroupsForOrder();
+  const fromIndex = groups.findIndex((group) => group.some((saved) => saved.stopId === stopId));
+  if (fromIndex === -1) return;
+  if (!groupCanReorder(groups[fromIndex])) {
     announce("The closest stop is ordered automatically.");
     return;
   }
-  const ordered = displayOrder();
-  const fromIndex = ordered.findIndex((stop) => stop.id === saved.id);
-  if (fromIndex === -1) return;
   const direction = event.key === "ArrowUp" ? -1 : 1;
-  const pinnedNearestId = autoOrderActive() ? state.nearestSavedId : undefined;
-  let toIndex = Math.max(0, Math.min(ordered.length - 1, fromIndex + direction));
-  if (pinnedNearestId) toIndex = Math.max(1, toIndex);
+  let toIndex = Math.max(0, Math.min(groups.length - 1, fromIndex + direction));
+  if (autoOrderActive()) toIndex = Math.max(1, toIndex);
   if (toIndex === fromIndex) return;
-  const next = [...ordered];
+  const next = [...groups];
   const [moved] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, moved);
-  void persistDisplayOrder(next, pinnedNearestId).catch((error) => {
+  void persistSavedStopGroups(next).catch((error) => {
     flashStatus(errorMessage(error, "Could not reorder stops."), "error");
   });
 }
 
-function onDragStart(event: DragEvent, saved: SavedStop): void {
-  if (!canReorderStop(saved) || !event.dataTransfer) return;
-  dragStopId = saved.id;
+let dragGroupStopId: string | undefined;
+
+function onGroupDragStart(event: DragEvent, group: HomeStopGroup): void {
+  const saved = group.entries.map((entry) => entry.saved);
+  const stopId = saved[0]?.stopId;
+  if (!stopId || !groupCanReorder(saved) || !event.dataTransfer) return;
+  dragGroupStopId = stopId;
   const card = (event.currentTarget as HTMLElement).closest(".stop-card");
   if (card) card.classList.add("is-dragging");
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.dropEffect = "move";
-  event.dataTransfer.setData("text/plain", saved.id);
+  event.dataTransfer.setData("text/plain", stopId);
 }
 
-function onDragEnd(_event: DragEvent): void {
-  dragStopId = undefined;
+function onGroupDragEnd(_event: DragEvent): void {
+  dragGroupStopId = undefined;
   for (const card of queryAll(".stop-card")) {
     card.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
   }
 }
 
-function onDragOver(event: DragEvent, saved: SavedStop): void {
-  if (!dragStopId || dragStopId === saved.id || !canReorderStop(saved)) return;
+function onGroupDragOver(event: DragEvent, group: HomeStopGroup): void {
+  const targetStopId = group.entries[0]?.saved.stopId;
+  const targetSaved = group.entries.map((entry) => entry.saved);
+  if (
+    !dragGroupStopId ||
+    !targetStopId ||
+    dragGroupStopId === targetStopId ||
+    !groupCanReorder(targetSaved)
+  ) return;
   event.preventDefault();
   const card = (event.currentTarget as HTMLElement).closest(".stop-card");
   if (!card) return;
@@ -950,60 +946,61 @@ function onDragOver(event: DragEvent, saved: SavedStop): void {
   card.classList.add(event.clientY < midY ? "is-drop-before" : "is-drop-after");
 }
 
-function onDragLeave(event: DragEvent): void {
+function onGroupDragLeave(event: DragEvent): void {
   const card = (event.currentTarget as HTMLElement).closest(".stop-card");
   const related = event.relatedTarget;
   if (card && related instanceof Node && card.contains(related)) return;
   if (card) card.classList.remove("is-drop-before", "is-drop-after");
 }
 
-async function onDrop(event: DragEvent, targetSaved: SavedStop): Promise<void> {
+async function onGroupDrop(event: DragEvent, targetGroup: HomeStopGroup): Promise<void> {
   event.preventDefault();
-  const sourceId = dragStopId;
-  if (!sourceId || sourceId === targetSaved.id || !canReorderStop(targetSaved)) {
-    onDragEnd(event);
+  const targetStopId = targetGroup.entries[0]?.saved.stopId;
+  const targetSaved = targetGroup.entries.map((entry) => entry.saved);
+  const sourceId = dragGroupStopId;
+  if (!sourceId || !targetStopId || sourceId === targetStopId || !groupCanReorder(targetSaved)) {
+    onGroupDragEnd(event);
     return;
   }
   const card = (event.currentTarget as HTMLElement).closest(".stop-card");
   if (!card) {
-    onDragEnd(event);
+    onGroupDragEnd(event);
     return;
   }
   const rect = card.getBoundingClientRect();
   const midY = rect.top + rect.height / 2;
   const insertBefore = event.clientY < midY;
 
-  const ordered = displayOrder();
-  const fromIndex = ordered.findIndex((stop) => stop.id === sourceId);
+  const groups = savedStopGroupsForOrder();
+  const fromIndex = groups.findIndex((group) => group.some((saved) => saved.stopId === sourceId));
   if (fromIndex === -1) {
-    onDragEnd(event);
+    onGroupDragEnd(event);
     return;
   }
-  let toIndex = ordered.findIndex((stop) => stop.id === targetSaved.id);
+  let toIndex = groups.findIndex((group) => group.some((saved) => saved.stopId === targetStopId));
   if (toIndex === -1) {
-    onDragEnd(event);
+    onGroupDragEnd(event);
     return;
   }
   if (!insertBefore) toIndex += 1;
   if (fromIndex < toIndex) toIndex -= 1;
-  const pinnedNearestId = autoOrderActive() ? state.nearestSavedId : undefined;
-  if (sourceId === pinnedNearestId) {
-    onDragEnd(event);
+  if (!groupCanReorder(groups[fromIndex])) {
+    onGroupDragEnd(event);
     return;
   }
-  if (pinnedNearestId) toIndex = Math.max(1, toIndex);
-  toIndex = Math.max(0, Math.min(ordered.length - 1, toIndex));
+  if (autoOrderActive()) toIndex = Math.max(1, toIndex);
+  toIndex = Math.max(0, Math.min(groups.length - 1, toIndex));
   if (fromIndex === toIndex) {
-    onDragEnd(event);
+    onGroupDragEnd(event);
     return;
   }
-  const next = [...ordered];
+  const next = [...groups];
   const [moved] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, moved);
 
-  onDragEnd(event);
+  onGroupDragEnd(event);
   try {
-    await persistDisplayOrder(next, pinnedNearestId);
+    await persistSavedStopGroups(next);
   } catch (error) {
     flashStatus(errorMessage(error, "Could not reorder stops."), "error");
   }
@@ -1050,9 +1047,14 @@ function departureNoteNodes(
   return notes;
 }
 
-function renderDeparture(group: NextBus, options: { compact?: boolean } = {}): HTMLElement {
+function renderDeparture(
+  group: NextBus,
+  options: { compact?: boolean; showKicker?: boolean; minimal?: boolean } = {},
+): HTMLElement {
   const departure = group.head;
   const compact = options.compact === true;
+  const showKicker = options.showKicker ?? compact;
+  const minimal = options.minimal === true;
   const now = Date.now();
   const labels = departureLabels(
     departure.timeMs,
@@ -1083,7 +1085,9 @@ function renderDeparture(group: NextBus, options: { compact?: boolean } = {}): H
           { className: "departure-summary" },
           compact
             ? [
-                element("span", { className: "departure-kicker", text: "Next" }),
+                showKicker
+                  ? element("span", { className: "departure-kicker", text: "Next" })
+                  : undefined,
                 element("span", {
                   className: labels.className,
                   text: labels.countdown,
@@ -1102,8 +1106,8 @@ function renderDeparture(group: NextBus, options: { compact?: boolean } = {}): H
                 }),
               ],
         ),
-        renderArrivalTimes(departure, group.rest),
-        notes.length > 0
+        minimal ? undefined : renderArrivalTimes(departure, group.rest),
+        !minimal && notes.length > 0
           ? element(
               "p",
               {
@@ -1169,26 +1173,7 @@ function renderStopTools(saved: SavedStop): HTMLElement {
   });
   tools.append(more, menu);
 
-  const canReorder = canReorderStop(saved);
   const entryName = savedEntryLabel(saved);
-  const grip = button(
-    "tool-button stop-grip",
-    {
-      ariaLabel: canReorder
-        ? `Reorder ${entryName}; use the arrow keys to move`
-        : `${entryName} is ordered automatically as the closest stop`,
-      title: canReorder
-        ? "Drag to reorder, or use the arrow keys"
-        : "Closest stop is ordered automatically",
-      dataset: { focusKey: `grip:${saved.id}` },
-    },
-    [icon(ICONS.grip, true), element("span", { className: "tool-label", text: "Reorder" })],
-  );
-  grip.disabled = !canReorder;
-  grip.draggable = canReorder;
-  if (canReorder) grip.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
-  grip.addEventListener("keydown", (event) => onGripKeyDown(event, saved));
-  menu.append(grip);
 
   if (proBuild) {
     const enabled = Boolean(saved.alertsEnabled) && proUnlocked();
@@ -1279,54 +1264,6 @@ function savedDirectionText(saved: SavedStop): string {
   return "All destinations";
 }
 
-function changeSavedDirection(saved: SavedStop, directionId?: DirectionId): Promise<void> {
-  const duplicate = state.savedStops.some(
-    (other) =>
-      other.id !== saved.id &&
-      other.stopId === saved.stopId &&
-      other.routeId === saved.routeId &&
-      other.directionId === directionId,
-  );
-  if (duplicate) {
-    flashStatus("That stop and destination are already saved.", "error");
-    render();
-    return Promise.resolve();
-  }
-  return updateSavedStop(saved.id, {
-    ...(directionId ? { directionId, directionHeadsign: directionHeadsign(saved.routeId ?? "", directionId) } : {}),
-    ...(directionId ? {} : { directionId: undefined, directionHeadsign: undefined }),
-  })
-    .then(afterStopsChanged)
-    .then(() => flashStatus(`${saved.stopName} destination updated`))
-    .catch((error) => {
-      flashStatus(errorMessage(error, "Could not update that destination."), "error");
-    });
-}
-
-function savedDirectionControl(saved: SavedStop): HTMLElement {
-  const routeId = saved.routeId;
-  if (!routeId) return element("span", { className: "saved-direction", text: "All destinations" });
-  const directions = directionsForStopRoute(saved.stopId, routeId);
-  if (directions.length <= 1) {
-    return element("span", { className: "saved-direction", text: savedDirectionText(saved) });
-  }
-  const select = element("select", {
-    className: "saved-direction",
-    ariaLabel: `Destination for ${saved.stopName}`,
-    dataset: { focusKey: `direction:${saved.id}` },
-  });
-  select.append(new Option("All destinations", ""));
-  for (const directionId of directions) {
-    select.append(new Option(directionLabel(routeId, directionId), directionId));
-  }
-  select.value = saved.directionId ?? "";
-  select.addEventListener("change", () => {
-    const value = select.value;
-    void changeSavedDirection(saved, value === "" ? undefined : (value as DirectionId));
-  });
-  return select;
-}
-
 function stopEmptyMessage(board: DepartureBoard, saved: SavedStop): string {
   if (board.scheduleExpired) {
     return "The saved timetable does not cover today. Reload the schedule from settings.";
@@ -1352,77 +1289,154 @@ function cardShouldAnimate(id: string): boolean {
   return true;
 }
 
-function renderStopCard(saved: SavedStop, board: DepartureBoard): HTMLElement {
-  const isNearest = proUnlocked() && saved.id === state.nearestSavedId;
-  const isNew = cardShouldAnimate(saved.id);
+interface HomeStopEntry {
+  saved: SavedStop;
+  board: DepartureBoard;
+}
+
+interface HomeStopGroup {
+  entries: HomeStopEntry[];
+}
+
+function groupStopBoards(entries: readonly HomeStopEntry[]): HomeStopGroup[] {
+  const groups = new Map<string, HomeStopGroup>();
+  for (const entry of entries) {
+    const group = groups.get(entry.saved.stopId);
+    if (group) {
+      group.entries.push(entry);
+    } else {
+      groups.set(entry.saved.stopId, { entries: [entry] });
+    }
+  }
+  return [...groups.values()];
+}
+
+function serviceDirectionMarker(saved: SavedStop): string {
+  if (!saved.routeId) return "•";
+  const directions = directionsForStopRoute(saved.stopId, saved.routeId);
+  const directionId = saved.directionId ?? (directions.length === 1 ? directions[0] : undefined);
+  if (directionId === "0") return "→";
+  if (directionId === "1") return "←";
+  return directions.length > 1 ? "↔" : "•";
+}
+
+function renderServiceRow(entry: HomeStopEntry): HTMLElement {
+  const { saved, board } = entry;
+  const route = savedRouteLabel(saved);
+  const routeInfo = saved.routeId ? routeFor(saved.routeId) : undefined;
+  const destination = saved.routeId
+    ? savedDirectionText(saved).replace(/^Toward\s+/i, "")
+    : "All routes";
+  const bus = nextBus(board.departures, state.settings.departuresPerStop);
+  const serviceLine = element("div", { className: "service-line" }, [
+    element("span", {
+      className: "service-arrow",
+      text: serviceDirectionMarker(saved),
+      ariaLabel: savedDirectionText(saved),
+    }),
+    route
+      ? element("span", {
+          className: "service-route-number",
+          text: route,
+          title: routeInfo?.longName ? `Route ${route} · ${routeInfo.longName}` : `Route ${route}`,
+        })
+      : element("span", { className: "service-route-number", text: "—" }),
+    element("span", { className: "service-destination", text: destination, title: destination }),
+    bus
+      ? element(
+          "ul",
+          {
+            className: "service-departures",
+            ariaLabel: route
+              ? `Next route ${route} departure from ${saved.stopName}`
+              : `Next departure from ${saved.stopName}`,
+          },
+          [renderDeparture(bus, { compact: true, showKicker: false, minimal: true })],
+        )
+      : undefined,
+    renderStopTools(saved),
+  ]);
+
+  return element(
+    "section",
+    { className: "service-row", dataset: { savedId: saved.id } },
+    [
+      serviceLine,
+      bus ? undefined : element("p", { className: "service-empty", text: stopEmptyMessage(board, saved) }),
+    ],
+  );
+}
+
+function renderStopReorderHandle(group: HomeStopGroup): HTMLButtonElement {
+  const primary = group.entries[0].saved;
+  const savedEntries = group.entries.map((entry) => entry.saved);
+  const canReorder = groupCanReorder(savedEntries);
+  const handle = button(
+    "tool-button stop-grip",
+    {
+      ariaLabel: canReorder
+        ? `Reorder ${primary.stopName}; drag to move or use the arrow keys`
+        : `${primary.stopName} is ordered automatically as the closest stop`,
+      title: canReorder
+        ? "Drag to reorder, or use the arrow keys"
+        : "Closest stop is ordered automatically",
+      dataset: { focusKey: `grip:${primary.stopId}` },
+    },
+    [icon(ICONS.grip, true)],
+  );
+  handle.disabled = !canReorder;
+  handle.draggable = canReorder;
+  if (canReorder) handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+  handle.addEventListener("keydown", (event) => onGroupGripKeyDown(event, primary.stopId));
+  return handle;
+}
+
+function renderStopCard(group: HomeStopGroup): HTMLElement {
+  const primary = group.entries[0].saved;
+  const isNearest =
+    proUnlocked() && group.entries.some((entry) => entry.saved.id === state.nearestSavedId);
+  const isNew = group.entries.some((entry) => cardShouldAnimate(entry.saved.id));
   const card = element("article", {
     className: `stop-card${isNearest ? " is-nearest" : ""}${isNew ? " is-new" : ""}`,
+    dataset: { stopId: primary.stopId },
   });
   card.setAttribute("role", "listitem");
 
-  // A card is one stop + route pair, so both facts live together in its heading.
-  const meta = element("div", { className: "stop-meta" }, [
-    element("span", { className: "meta-code", text: `Stop ${saved.stopCode}` }),
-  ]);
-  const route = savedRouteLabel(saved);
-  const distance = state.distancesById?.get(saved.id);
-  if (distance !== undefined) {
-    meta.append(
-      element("span", {
-        className: "meta-distance",
-        text: formatDistance(distance),
-        title: `Straight-line distance; ${formatWalkTime(distance)} is an estimate`,
-      }),
-    );
-  }
-  if (isNearest) {
-    meta.append(element("span", { className: "stop-tag", text: "Closest" }));
-  }
+  // The draft makes the physical stop the top-level object. Routes and
+  // destinations are service rows inside it, while storage remains flat.
+  const hasSameNameStop = state.savedStops.some(
+    (other) => other.stopId !== primary.stopId && other.stopName === primary.stopName,
+  );
+  const meta = hasSameNameStop
+    ? element("div", { className: "stop-meta" }, [
+        element("span", { className: "meta-code", text: `Stop ${primary.stopCode}` }),
+      ])
+    : undefined;
 
+  const serviceRows = group.entries.map((entry) => renderServiceRow(entry));
   card.append(
-    element("div", { className: "stop-head" }, [
+    element("div", { className: "stop-group-head" }, [
       element("div", { className: "stop-identity" }, [
-        element("h3", { className: "stop-name", text: saved.stopName, title: saved.stopName }),
-        route
-          ? element("div", { className: "saved-route-line" }, [
-              element("span", { text: `Route ${route}` }),
-              savedDirectionControl(saved),
-            ])
-          : undefined,
+        element("h3", {
+          className: "stop-name",
+          text: primary.stopName,
+          title: primary.stopName,
+        }),
         meta,
       ]),
-      renderStopTools(saved),
+      renderStopReorderHandle(group),
     ]),
+    element("div", { className: "service-list" }, serviceRows),
   );
 
-  const bus = nextBus(board.departures, state.settings.departuresPerStop);
-  if (bus) {
-    const list = element(
-      "ul",
-      {
-        className: "departures",
-        ariaLabel: route
-          ? `Next route ${route} departure from ${saved.stopName}`
-          : `Next departure from ${saved.stopName}`,
-      },
-      [renderDeparture(bus, { compact: true })],
-    );
-    card.append(list);
-  } else {
-    card.append(
-      element("p", { className: "stop-empty", text: stopEmptyMessage(board, saved) }),
-    );
-  }
-
-  // Drag-and-drop reorder wiring
   const grip = card.querySelector<HTMLElement>(".stop-grip");
   if (grip && !grip.hasAttribute("disabled")) {
-    grip.addEventListener("dragstart", (event) => onDragStart(event as DragEvent, saved));
-    grip.addEventListener("dragend", (event) => onDragEnd(event as DragEvent));
+    grip.addEventListener("dragstart", (event) => onGroupDragStart(event as DragEvent, group));
+    grip.addEventListener("dragend", (event) => onGroupDragEnd(event as DragEvent));
   }
-  card.addEventListener("dragover", (event) => onDragOver(event as DragEvent, saved));
-  card.addEventListener("dragleave", (event) => onDragLeave(event as DragEvent));
-  card.addEventListener("drop", (event) => onDrop(event as DragEvent, saved));
+  card.addEventListener("dragover", (event) => onGroupDragOver(event as DragEvent, group));
+  card.addEventListener("dragleave", (event) => onGroupDragLeave(event as DragEvent));
+  card.addEventListener("drop", (event) => void onGroupDrop(event as DragEvent, group));
 
   return card;
 }
@@ -1482,8 +1496,9 @@ function renderStops(): DepartureBoard[] {
     el.emptySearchButton.hidden = false;
   }
   const entries = stopBoards();
+  const groups = groupStopBoards(entries);
   el.stopList.replaceChildren(
-    ...entries.map(({ saved, board }) => renderStopCard(saved, board)),
+    ...groups.map((group) => renderStopCard(group)),
   );
   return entries.map((entry) => entry.board);
 }
@@ -1766,15 +1781,19 @@ function resultItem(
         })
       : undefined,
   ]);
-  const actions = resultRouteItem(stop, routeId, options);
-  actions.classList.add("route-browser-actions");
+  const actions = resultRouteGroup(stop, routeId, {
+    ...options,
+    showDestination: true,
+  });
   return element("li", { className: "result-row" }, [
-    element("div", { className: "result-entry" }, [
-      element("div", { className: "result-copy" }, [
-        element("p", { className: "result-name", text: stop.name, title: stop.name }),
-        meta,
+    element("div", { className: "result-stop-location route-result-location" }, [
+      element("div", { className: "result-location-heading" }, [
+        element("div", { className: "result-copy" }, [
+          element("p", { className: "result-name", text: stop.name, title: stop.name }),
+          meta,
+        ]),
       ]),
-      actions,
+      element("div", { className: "result-route-list" }, [actions]),
     ]),
   ]);
 }
@@ -2034,8 +2053,7 @@ function renderRoutePane(): void {
     );
     return stopDirections.map((directionId) =>
       resultItem(stop, state.selectedRouteId, {
-        showRouteBadge: false,
-        showDestination: stopDirections.length > 1,
+        showDestination: true,
         directionId,
         ...(distanceMeters !== undefined ? { distanceMeters } : {}),
       }),
@@ -2057,29 +2075,22 @@ function renderRoutePane(): void {
 function renderPicker(): void {
   const atLimit = state.savedStops.length >= MAX_SAVED_STOPS;
   el.picker.classList.toggle("is-open", state.pickerOpen);
-  el.topbarAddButton.textContent = state.pickerOpen ? "Close" : "Add stop";
-  el.topbarAddButton.disabled =
-    (!state.index && !state.pickerOpen) || (atLimit && !state.pickerOpen);
-  el.topbarAddButton.title = state.pickerOpen
-    ? "Close stop picker"
-    : state.loading && !state.index
-      ? "The timetable is still loading"
-      : "Add a stop";
-  el.topbarAddButton.setAttribute("aria-expanded", String(state.pickerOpen));
-  el.topbarAddButton.setAttribute(
+  el.pickerToggle.setAttribute("aria-expanded", String(state.pickerOpen));
+  el.pickerToggle.setAttribute(
     "aria-label",
     state.pickerOpen ? "Close stop picker" : "Add a stop",
   );
-  el.pickerToggle.setAttribute("aria-expanded", String(state.pickerOpen));
   el.pickerBody.hidden = !state.pickerOpen;
   el.tabRoute.disabled = !state.index;
-  el.pickerToggle.querySelector(".picker-toggle-label")!.textContent = !state.index
-    ? state.loading
-      ? "Loading timetable…"
-      : "Schedule unavailable"
-    : atLimit
-      ? `Saved limit reached (${MAX_SAVED_STOPS})`
-      : "Add a stop";
+  el.pickerToggle.querySelector(".picker-toggle-label")!.textContent = state.pickerOpen
+    ? "Close"
+    : !state.index
+      ? state.loading
+        ? "Loading timetable…"
+        : "Schedule unavailable"
+      : atLimit
+        ? `Saved limit reached (${MAX_SAVED_STOPS})`
+        : "Add a stop";
   el.pickerToggle.disabled =
     (!state.index && !state.pickerOpen) || (atLimit && !state.pickerOpen);
   if (!state.pickerOpen) return;
@@ -2708,13 +2719,6 @@ el.settingsButton.addEventListener("click", () => {
 el.planButton.addEventListener("click", () => {
   if (state.planOpen) closePlan();
   else openPlan();
-});
-
-el.topbarAddButton.addEventListener("click", () => {
-  state.pickerOpen = !state.pickerOpen;
-  if (state.pickerOpen) state.settingsOpen = false;
-  render();
-  focusPickerStart();
 });
 
 el.planClose.addEventListener("click", closePlan);
